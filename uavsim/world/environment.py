@@ -15,7 +15,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from uavsim.physics.rigid_body import RigidBody
+
+# Half the side length of the square world grid. The UAV cannot fly beyond
+# [-WORLD_EXTENT_HALF, WORLD_EXTENT_HALF] in X or Y.
+WORLD_EXTENT_HALF = 50
 
 # Simple friction coefficient applied to horizontal velocity while resting
 # on the ground (landing gear grip), per second of contact.
@@ -34,6 +40,25 @@ class FlatGroundPlane:
 @dataclass
 class World:
     ground: FlatGroundPlane = field(default_factory=FlatGroundPlane)
+    extent_half: float = WORLD_EXTENT_HALF
+
+
+def apply_world_bounds(body: RigidBody, extent_half: float) -> None:
+    """Clamp `body` position inside the square world limits and kill velocity
+    components that would push it outside.
+
+    This mirrors the approach of `apply_ground_contact`: passive position
+    clamping every tick, no impulse-based collision response.
+    """
+    for axis in (0, 1):
+        if body.position[axis] < -extent_half:
+            body.position[axis] = -extent_half
+            if body.velocity[axis] < 0.0:
+                body.velocity[axis] = 0.0
+        elif body.position[axis] > extent_half:
+            body.position[axis] = extent_half
+            if body.velocity[axis] > 0.0:
+                body.velocity[axis] = 0.0
 
 
 def apply_ground_contact(body: RigidBody, ground: FlatGroundPlane, dt: float) -> bool:

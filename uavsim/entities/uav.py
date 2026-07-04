@@ -24,7 +24,12 @@ from uavsim.comms.telemetry import TelemetryPacket
 from uavsim.physics.battery import Battery
 from uavsim.physics.motor import Motor
 from uavsim.physics.rigid_body import RigidBody
-from uavsim.world.environment import FlatGroundPlane, apply_ground_contact
+from uavsim.world.environment import (
+    FlatGroundPlane,
+    WORLD_EXTENT_HALF,
+    apply_ground_contact,
+    apply_world_bounds,
+)
 
 
 class MotorId:
@@ -114,6 +119,12 @@ class UAV:
             self.motors[command.motor_id].increase_throttle()
         elif command.opcode == CommandOpcode.THROTTLE_DOWN:
             self.motors[command.motor_id].decrease_throttle()
+        elif command.opcode == CommandOpcode.THROTTLE_UP_ALL:
+            for motor in self.motors:
+                motor.increase_throttle()
+        elif command.opcode == CommandOpcode.THROTTLE_DOWN_ALL:
+            for motor in self.motors:
+                motor.decrease_throttle()
         elif command.opcode == CommandOpcode.ARM:
             self._armed = True
         elif command.opcode == CommandOpcode.DISARM:
@@ -136,6 +147,7 @@ class UAV:
         )
         self.body.apply_body_forces(dt, forces_body, points_body, yaw_reaction_torque)
         self.is_grounded = apply_ground_contact(self.body, self.ground, dt)
+        apply_world_bounds(self.body, WORLD_EXTENT_HALF)
 
     # -- battery ---------------------------------------------------------------
     def _update_battery(self, dt: float) -> None:

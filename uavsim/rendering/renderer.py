@@ -41,7 +41,7 @@ from OpenGL.GLU import gluLookAt, gluProject
 from uavsim.entities.uav import UAV
 from uavsim.hud.hud import SIGNAL_WINDOW_SECONDS, HUDSnapshot
 from uavsim.rendering.vector_font import draw_text
-from uavsim.world.environment import World
+from uavsim.world.environment import WORLD_EXTENT_HALF, World
 
 GROUND_COLOR = (0.2, 0.25, 0.3)
 GROUND_MAJOR_COLOR = (0.3, 0.4, 0.5)
@@ -60,7 +60,7 @@ HUD_PANEL_BORDER_COLOR = (0.4, 0.6, 0.5)
 HUD_WAVEFORM_COLOR = (0.3, 1.0, 0.5)
 HUD_BAR_COLOR = (0.9, 0.9, 0.9)
 
-GROUND_GRID_SPAN = 50
+GROUND_GRID_SPAN = WORLD_EXTENT_HALF
 GROUND_MAJOR_STEP = 5
 
 _SIGNAL_BITS_SAMPLED = 8
@@ -302,10 +302,10 @@ class Renderer:
         bar_width, gap, max_height, margin = 20.0, 12.0, 110.0, 16.0
         base_y = margin + 14.0
 
-        glColor3f(*HUD_BAR_COLOR)
         glBegin(GL_LINES)
         for i, value in enumerate(throttle):
             x = margin + i * (bar_width + gap)
+            glColor3f(*UAV_MOTOR_COLORS[i])
             glVertex2f(x, base_y)
             glVertex2f(x, base_y + max_height * value)
             glVertex2f(x + bar_width, base_y)

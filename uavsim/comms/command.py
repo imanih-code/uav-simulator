@@ -25,6 +25,8 @@ class CommandOpcode(IntEnum):
     ARM = 0b010
     DISARM = 0b011
     EMERGENCY_CUT = 0b100
+    THROTTLE_UP_ALL = 0b101
+    THROTTLE_DOWN_ALL = 0b110
 
 
 _OPCODE_SHIFT = 5

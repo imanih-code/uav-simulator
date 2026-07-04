@@ -28,8 +28,8 @@ from uavsim.comms.telemetry import TelemetryPacket
 #   2 / W -> back-right motor
 #   3 / E -> back-left motor
 #   4 / R -> front-left motor
-THROTTLE_UP_KEYS = {"1": 0, "2": 1, "3": 2, "4": 3}
-THROTTLE_DOWN_KEYS = {"q": 0, "w": 1, "e": 2, "r": 3}
+THROTTLE_UP_KEYS = {"1": 0, "2": 1, "3": 2, "4": 3, "5": -1}
+THROTTLE_DOWN_KEYS = {"q": 0, "w": 1, "e": 2, "r": 3, "t": -1}
 
 # How often the "transmitter" re-sends a throttle command while a key is
 # held. 20 Hz is a realistic digital-RC update rate and comfortably below
@@ -70,9 +70,15 @@ class UAVOperator:
     def _command_for_key(key: str) -> Optional[Command]:
         key = key.lower()
         if key in THROTTLE_UP_KEYS:
-            return Command(CommandOpcode.THROTTLE_UP, motor_id=THROTTLE_UP_KEYS[key])
+            motor_id = THROTTLE_UP_KEYS[key]
+            if motor_id == -1:
+                return Command(CommandOpcode.THROTTLE_UP_ALL)
+            return Command(CommandOpcode.THROTTLE_UP, motor_id=motor_id)
         if key in THROTTLE_DOWN_KEYS:
-            return Command(CommandOpcode.THROTTLE_DOWN, motor_id=THROTTLE_DOWN_KEYS[key])
+            motor_id = THROTTLE_DOWN_KEYS[key]
+            if motor_id == -1:
+                return Command(CommandOpcode.THROTTLE_DOWN_ALL)
+            return Command(CommandOpcode.THROTTLE_DOWN, motor_id=motor_id)
         return None
 
     def poll_telemetry(self) -> Optional[TelemetryPacket]:
