@@ -1,0 +1,79 @@
+"""HUD: reads everything it shows either from telemetry the UAVOperator has
+buffered, or straight from the Operator's two gateways (bandwidth, raw
+signal history). It never talks to the UAV directly. Actual drawing lives
+in the rendering package; this class only decides "what to show".
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
+
+import numpy as np
+
+from uavsim.entities.operator import UAVOperator
+
+# How much signal history each oscilloscope-style HUD graph keeps on screen.
+SIGNAL_WINDOW_SECONDS = 1.5
+
+
+@dataclass(frozen=True)
+class HUDSnapshot:
+    has_telemetry: bool
+    position: Optional[Tuple[float, float, float]] = None
+    velocity: Optional[Tuple[float, float, float]] = None
+    attitude_deg: Optional[Tuple[float, float, float]] = None
+    motor_throttle: Optional[Tuple[float, float, float, float]] = None
+    battery_percent: Optional[float] = None
+    mass_kg: Optional[float] = None
+
+    uplink_bandwidth_bps: float = 0.0
+    downlink_bandwidth_bps: float = 0.0
+    uplink_signal: Tuple[Tuple[float, bytes], ...] = field(default_factory=tuple)
+    downlink_signal: Tuple[Tuple[float, bytes], ...] = field(default_factory=tuple)
+    now: float = 0.0
+
+
+class HUD:
+    def __init__(self, operator: UAVOperator) -> None:
+        self._operator = operator
+
+    def refresh(self) -> HUDSnapshot:
+        """Pull the freshest telemetry plus live channel stats."""
+        packet = self._operator.poll_telemetry()
+        now = time.monotonic()
+
+        uplink_bandwidth = self._operator.command_output.bandwidth_bps()
+        downlink_bandwidth = self._operator.telemetry_input.bandwidth_bps()
+        uplink_signal = tuple(
+            self._operator.command_output.recent_transmissions(SIGNAL_WINDOW_SECONDS)
+        )
+        downlink_signal = tuple(
+            self._operator.telemetry_input.recent_transmissions(SIGNAL_WINDOW_SECONDS)
+        )
+
+        if packet is None:
+            return HUDSnapshot(
+                has_telemetry=False,
+                uplink_bandwidth_bps=uplink_bandwidth,
+                downlink_bandwidth_bps=downlink_bandwidth,
+                uplink_signal=uplink_signal,
+                downlink_signal=downlink_signal,
+                now=now,
+            )
+
+        attitude_deg = tuple(np.degrees(packet.attitude_rpy).tolist())
+        return HUDSnapshot(
+            has_telemetry=True,
+            position=tuple(packet.position.tolist()),
+            velocity=tuple(packet.velocity.tolist()),
+            attitude_deg=attitude_deg,
+            motor_throttle=tuple(packet.motor_throttle.tolist()),
+            battery_percent=packet.battery_percent,
+            mass_kg=packet.mass,
+            uplink_bandwidth_bps=uplink_bandwidth,
+            downlink_bandwidth_bps=downlink_bandwidth,
+            uplink_signal=uplink_signal,
+            downlink_signal=downlink_signal,
+            now=now,
+        )

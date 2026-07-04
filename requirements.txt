@@ -1,0 +1,12 @@
+# Instalables con pip:
+numpy>=1.26,<2       # GNU Radio en Ubuntu/Debian (paquetes del sistema) suele estar
+                     # compilado contra numpy 1.x; numpy 2.x rompe el import de
+                     # gnuradio.gr con un error de ABI. Si tu instalación de GNU
+                     # Radio ya es compatible con numpy 2.x (p.ej. via radioconda
+                     # reciente), podés sacar el <2.
+scipy>=1.11
+pygame>=2.5
+PyOpenGL>=3.1
+PyOpenGL_accelerate>=3.1
+
+# GNU Radio NO se instala con pip -- ver README.md, sección "Instalar GNU Radio".
