@@ -394,7 +394,7 @@ class Renderer:
         high_y = y + height * 0.55
         glColor3f(*HUD_WAVEFORM_COLOR)
         glBegin(GL_LINES)
-        for seg in _waveform_segments(transmissions, now, SIGNAL_WINDOW_SECONDS):
+        for seg in _waveform_segments(transmissions, now, SIGNAL_WINDOW_SECONDS, label):
             t0, l0, t1, l1 = seg
             px0 = x + (t0 / SIGNAL_WINDOW_SECONDS) * width
             py0 = high_y if l0 else low_y
@@ -450,6 +450,7 @@ def _waveform_segments(
     transmissions: Tuple[Tuple[float, bytes], ...],
     now: float,
     window_seconds: float,
+    key: str = "",
 ) -> List[Tuple[float, int, float, int]]:
     """Turn transmissions into NRZ square-wave segments.
 
@@ -458,13 +459,15 @@ def _waveform_segments(
     can be drawn with GL_LINES — no LINE_STRIP diagonals between unrelated
     points.
 
-    Tracks the last signal level across calls via a function attribute so
-    the waveform doesn't jump to 0 at the left edge every frame.
+    Tracks the last signal level per *key* across calls via a function
+    attribute so each panel (TX/RX) keeps its own state and the waveform
+    doesn't jump to 0 at the left edge every frame.
     """
     window_start = now - window_seconds
+    state: dict = getattr(_waveform_segments, '_state', {})
     segments: List[Tuple[float, int, float, int]] = []
     prev_t = 0.0
-    prev_l = getattr(_waveform_segments, '_last_level', 0)
+    prev_l = state.get(key, 0)
 
     for timestamp, payload in transmissions:
         if not payload:
@@ -495,5 +498,6 @@ def _waveform_segments(
     if prev_t < window_seconds:
         segments.append((prev_t, prev_l, window_seconds, prev_l))
 
-    _waveform_segments._last_level = prev_l
+    state[key] = prev_l
+    _waveform_segments._state = state
     return segments
