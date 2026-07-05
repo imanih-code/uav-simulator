@@ -7,6 +7,7 @@ requirement. Text is drawn with the hand-rolled stroke font in
 from __future__ import annotations
 
 import time
+from collections import deque
 from typing import List, Tuple
 
 import numpy as np
@@ -84,6 +85,8 @@ MINIMAP_MOTOR_RADIUS_PX = 8.0
 MINIMAP_MOTOR_DOT_RADIUS = 2.5
 MINIMAP_X_ARM = 5.0
 
+NOISE_PANEL_HEIGHT = 55
+
 GROUND_GRID_SPAN = WORLD_EXTENT_HALF
 GROUND_MAJOR_STEP = 5
 
@@ -99,6 +102,7 @@ class Renderer:
         self.hud_width = hud_width
         self.hud_height = hud_height
         self._motor_labels: List[Tuple[float, float, int]] = []
+        self._noise_history: deque = deque(maxlen=300)
 
     def draw_scene(self, camera_eye: np.ndarray, camera_target: np.ndarray,
                    jammers: List[Jammer] = []) -> None:
@@ -114,7 +118,8 @@ class Renderer:
             self._draw_jammer(jammer, camera_eye)
 
     def draw_hud(self, snapshot: HUDSnapshot, paused: bool = False,
-                 jammers: List[Jammer] = []) -> None:
+                 jammers: List[Jammer] = [], uplink_noise: float = 0.0,
+                 downlink_noise: float = 0.0) -> None:
         self._begin_hud_overlay()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
@@ -122,6 +127,7 @@ class Renderer:
         self._draw_signal_panels(snapshot)
         if snapshot.has_telemetry and snapshot.motor_throttle is not None:
             self._draw_throttle_bars(snapshot.motor_throttle)
+        self._draw_noise_timeline(uplink_noise, downlink_noise)
         self._draw_minimap(jammers)
         if paused:
             self._draw_pause_overlay(len(jammers))
@@ -567,6 +573,64 @@ class Renderer:
             x = margin + i * (bar_width + gap)
             draw_text(str(i + 1), x + bar_width * 0.3, margin - 2, 6.0, 9.0, 1.5,
                        self._segment_drawer())
+        glEnd()
+
+    def _draw_noise_timeline(self, uplink_noise: float, downlink_noise: float) -> None:
+        self._noise_history.append((uplink_noise, downlink_noise))
+        hist = list(self._noise_history)
+        if len(hist) < 2:
+            return
+
+        panel_width = 300.0
+        panel_height = 85.0
+        gap = 8.0
+        x = self.hud_width - panel_width - 14.0
+        tx_y = self.hud_height - panel_height - 14.0
+        rx_y = tx_y - panel_height - gap
+        y = rx_y - NOISE_PANEL_HEIGHT - gap
+
+        max_noise = max(max(u, d) for u, d in hist) or 1.0
+
+        graph_left = x + 4
+        graph_right = x + panel_width - 4
+        graph_width = graph_right - graph_left
+        graph_bottom = y + 4
+        graph_top = y + NOISE_PANEL_HEIGHT - 12
+        graph_height = graph_top - graph_bottom
+
+        # Border
+        glColor3f(*HUD_PANEL_BORDER_COLOR)
+        glBegin(GL_LINE_LOOP)
+        glVertex2f(x, y)
+        glVertex2f(x + panel_width, y)
+        glVertex2f(x + panel_width, y + NOISE_PANEL_HEIGHT)
+        glVertex2f(x, y + NOISE_PANEL_HEIGHT)
+        glEnd()
+
+        # Label + current values
+        glColor3f(*HUD_TEXT_COLOR)
+        glBegin(GL_LINES)
+        draw_text(f"N {uplink_noise:.2f}/{downlink_noise:.2f}", x + 4,
+                   y + NOISE_PANEL_HEIGHT - 9 - 3, 5.5, 8.0, 1.5,
+                   self._segment_drawer())
+        glEnd()
+
+        # Uplink noise line (TX)
+        glColor3f(*HUD_RAW_SIGNAL_COLOR)
+        glBegin(GL_LINE_STRIP)
+        for i, (u, _) in enumerate(hist):
+            px = graph_left + (i / (len(hist) - 1)) * graph_width
+            py = graph_bottom + (u / max_noise) * graph_height
+            glVertex2f(px, py)
+        glEnd()
+
+        # Downlink noise line (RX)
+        glColor3f(*HUD_WAVEFORM_COLOR)
+        glBegin(GL_LINE_STRIP)
+        for i, (_, d) in enumerate(hist):
+            px = graph_left + (i / (len(hist) - 1)) * graph_width
+            py = graph_bottom + (d / max_noise) * graph_height
+            glVertex2f(px, py)
         glEnd()
 
     def _draw_minimap(self, jammers: List[Jammer]) -> None:

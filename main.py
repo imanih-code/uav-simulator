@@ -184,7 +184,9 @@ def main() -> None:
             window.begin_frame()
             eye, target = camera.eye_and_target(uav.body.position)
             renderer.draw_scene(eye, target, jammers)
-            renderer.draw_hud(snapshot, paused, jammers)
+            renderer.draw_hud(snapshot, paused, jammers,
+                               command_link.noise_voltage,
+                               telemetry_link.noise_voltage)
             window.end_frame()
 
             frame_time = time.perf_counter() - now
