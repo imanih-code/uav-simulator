@@ -108,7 +108,7 @@ class UAV:
         self._last_pair_cmd_time: List[float] = [0.0, 0.0]
         self._armed = True
         self.is_grounded = True
-        self._command_log: deque = deque(maxlen=4)
+        self._command_log: deque = deque(maxlen=10)
         self._was_airborne = False
         self._health = 100.0
         self._dead = False

@@ -19,7 +19,7 @@ import numpy as np
 # + health_percent(1)
 # -> 20 doubles, network byte order.
 # Appended: command_log (4 ints) — each int encodes (opcode<<16)|(motor_id<<8)|valid_flag.
-_STRUCT_FORMAT = "!20d4i"
+_STRUCT_FORMAT = "!20d10i"
 PACKET_SIZE = struct.calcsize(_STRUCT_FORMAT)
 
 
@@ -38,7 +38,7 @@ class TelemetryPacket:
     health_percent: float = 100.0
     command_log: Tuple[Tuple[int, int, bool], ...] = ()  # (opcode, motor, valid)
 
-    _LOG_SLOTS = 4
+    _LOG_SLOTS = 10
 
     def encode(self) -> bytes:
         log_ints = []
@@ -68,7 +68,7 @@ class TelemetryPacket:
             raise ValueError(f"Expected {PACKET_SIZE} bytes, got {len(data)}")
 
         values = struct.unpack(_STRUCT_FORMAT, data)
-        log_ints = values[20:24]
+        log_ints = values[20:30]
         command_log = []
         for v in log_ints:
             if v == 0:
@@ -100,7 +100,7 @@ class TelemetryPacket:
             raise ValueError(f"Expected {PACKET_SIZE} bytes, got {len(data)}")
 
         values = struct.unpack(_STRUCT_FORMAT, data)
-        log_ints = values[20:24]
+        log_ints = values[20:30]
         command_log = []
         for v in log_ints:
             if v == 0:

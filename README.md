@@ -37,6 +37,14 @@ Verify it's installed and importable from the Python you'll use:
 python3 -c "from gnuradio import gr, blocks, digital, channels; print(gr.version())"
 ```
 
+⚠️ **If you see `gr::vmcircbuf :error: shmat (2): Invalid argument` at runtime**:
+GNU Radio's shared-memory vmcircbuf can fail on some systems. Set this env
+var before running (or add it to your `~/.bashrc`):
+
+```bash
+export GR_SCHEDULER=STS
+```
+
 ⚠️ **If you get a NumPy error like "compiled using NumPy 1.x cannot be run in NumPy 2.x"**:
 your distro's GNU Radio was compiled against NumPy 1.x. Downgrade numpy in
 that environment (`pip install "numpy<2" --force-reinstall`) — this is what
@@ -88,7 +96,8 @@ operator, give it enough thrust.
 | Arrow keys   | FREE mode: move the camera. FOLLOW mode: orbit / zoom |
 | Mouse        | Rotate view (orbit in FOLLOW, look around in FREE) |
 | `V`          | Toggle between FOLLOW (chases the UAV, GTA-style) and FREE (spectator, fully free) |
-| `BACKSPACE`  | Reset the UAV to its initial parked state (position, battery, health, throttle) |
+| `BACKSPACE`  | Reset UAV + randomly reposition all jammers |
+| `P`          | Pause / unpause (camera keeps working while paused) |
 | `ESC`        | Quit |
 
 When pressing `V` the camera doesn't "jump": it keeps the current viewpoint
@@ -110,8 +119,11 @@ directly — the `HUD` only talks to the `UAVOperator`.
 - **Horizontal position** (`POSX`/`POSY`, meters).
 - **Mass** (`MASS`, kg) — total mass = body + 4 motors, treated as a single
   point mass for physics (each motor's separate inertia is not modeled).
-- **Command log** — last 4 commands received by the UAV, shown below the
+- **Command log** — last 10 commands received by the UAV, shown below the
   telemetry readout. Valid commands appear in green, corrupted ones in red.
+- **Minimap** (bottom-right) — top-down view (200×200 world-units) with the
+  UAV icon at centre (coloured motor circles + X rotated by yaw) and jammer
+  positions with their effect-range circles, clipped to the minimap border.
 - **Bandwidth** — two oscilloscope-style panels: `TX` (uplink:
   Operator → UAV, commands) and `RX` (downlink: UAV → Operator, telemetry).
   Each panel shows a **single channel** (no multi-channel): bandwidth in
@@ -244,9 +256,8 @@ doesn't "go crazy" with it.
 
 ## Next steps (not yet implemented)
 
-- Jammers: with the link already being real GNU Radio, this is now literally
-  increasing `noise_voltage` (or `frequency_offset`) on a `GnuRadioChannel`
-  based on distance to an interference source — the infrastructure is already
-  there.
+- ~~Jammers~~ ✅ done — orange-red cylinders with dotted range circles that
+  raise the noise floor on both radio links. Randomly placed at startup,
+  repositioned on reset. The minimap shows their positions and range.
 - Non-flat terrain.
 - More realistic ground contact (real normal force instead of clamping).
