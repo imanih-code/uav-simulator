@@ -6,6 +6,7 @@ requirement. Text is drawn with the hand-rolled stroke font in
 """
 from __future__ import annotations
 
+import time
 from typing import List, Tuple
 
 import numpy as np
@@ -19,6 +20,7 @@ from OpenGL.GL import (
     GL_POINTS,
     GL_PROJECTION,
     GL_PROJECTION_MATRIX,
+    GL_SCISSOR_TEST,
     GL_VIEWPORT,
     glBegin,
     glColor3f,
@@ -33,11 +35,13 @@ from OpenGL.GL import (
     glPointSize,
     glPopMatrix,
     glPushMatrix,
+    glScissor,
     glVertex2f,
     glVertex3f,
 )
 from OpenGL.GLU import gluLookAt, gluProject
 
+from uavsim.entities.jammer import Jammer
 from uavsim.entities.uav import UAV
 from uavsim.hud.hud import SIGNAL_WINDOW_SECONDS, HUDSnapshot
 from uavsim.rendering.vector_font import draw_text
@@ -65,6 +69,21 @@ HUD_PANEL_BORDER_COLOR = (0.4, 0.6, 0.5)
 HUD_WAVEFORM_COLOR = (0.3, 1.0, 0.5)
 HUD_BAR_COLOR = (0.9, 0.9, 0.9)
 
+JAMMER_BODY_COLOR = (1.0, 0.3, 0.1)     # naranja-rojizo
+JAMMER_CIRCLE_COLOR = (1.0, 0.1, 0.1)   # rojo para círculos de radio
+JAMMER_BLINK_COLOR_ON = (1.0, 0.0, 0.0)  # rojo encendido
+JAMMER_BLINK_COLOR_OFF = (0.2, 0.0, 0.0) # rojo apagado (tenue)
+
+MINIMAP_SIZE = 180
+MINIMAP_MARGIN = 14
+MINIMAP_EXTENT = 100.0
+MINIMAP_BG_COLOR = (0.08, 0.10, 0.14)
+MINIMAP_BORDER_COLOR = (0.4, 0.6, 0.5)
+MINIMAP_UAV_COLOR = (1.0, 0.0, 0.0)
+MINIMAP_MOTOR_RADIUS_PX = 8.0
+MINIMAP_MOTOR_DOT_RADIUS = 2.5
+MINIMAP_X_ARM = 5.0
+
 GROUND_GRID_SPAN = WORLD_EXTENT_HALF
 GROUND_MAJOR_STEP = 5
 
@@ -81,7 +100,8 @@ class Renderer:
         self.hud_height = hud_height
         self._motor_labels: List[Tuple[float, float, int]] = []
 
-    def draw_scene(self, camera_eye: np.ndarray, camera_target: np.ndarray) -> None:
+    def draw_scene(self, camera_eye: np.ndarray, camera_target: np.ndarray,
+                   jammers: List[Jammer] = []) -> None:
         gluLookAt(
             camera_eye[0], camera_eye[1], camera_eye[2],
             camera_target[0], camera_target[1], camera_target[2],
@@ -90,8 +110,11 @@ class Renderer:
         self._draw_ground()
         motor_points = self._draw_uav(camera_eye)
         self._project_motor_labels(motor_points)
+        for jammer in jammers:
+            self._draw_jammer(jammer, camera_eye)
 
-    def draw_hud(self, snapshot: HUDSnapshot) -> None:
+    def draw_hud(self, snapshot: HUDSnapshot, paused: bool = False,
+                 jammers: List[Jammer] = []) -> None:
         self._begin_hud_overlay()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
@@ -99,6 +122,9 @@ class Renderer:
         self._draw_signal_panels(snapshot)
         if snapshot.has_telemetry and snapshot.motor_throttle is not None:
             self._draw_throttle_bars(snapshot.motor_throttle)
+        self._draw_minimap(jammers)
+        if paused:
+            self._draw_pause_overlay(len(jammers))
         self._end_hud_overlay()
 
     # -- world ---------------------------------------------------------------
@@ -244,6 +270,80 @@ class Renderer:
         glEnd()
 
         return motor_points
+
+    def _draw_jammer(self, jammer: Jammer, camera_eye: np.ndarray) -> None:
+        pos = jammer.position
+        top = pos + np.array([0.0, 0.0, jammer.cylinder_height])
+        radius = jammer.radius
+        num_seg = 48
+
+        # -- Ground circle (horizontal, dotted) --
+        glColor3f(*JAMMER_CIRCLE_COLOR)
+        glBegin(GL_LINES)
+        for i in range(0, num_seg, 2):
+            a = 2.0 * np.pi * i / num_seg
+            b = 2.0 * np.pi * (i + 1) / num_seg
+            glVertex3f(pos[0] + radius * np.cos(a), pos[1] + radius * np.sin(a), pos[2])
+            glVertex3f(pos[0] + radius * np.cos(b), pos[1] + radius * np.sin(b), pos[2])
+        glEnd()
+
+        # -- Billboard circle (camera-facing, vertical, dotted) --
+        view_dir = camera_eye - pos
+        view_dist = np.linalg.norm(view_dir)
+        if view_dist > 1e-8:
+            view_dir /= view_dist
+        ref_up = np.array([0.0, 0.0, 1.0])
+        if abs(np.dot(view_dir, ref_up)) > 0.99:
+            ref_up = np.array([0.0, 1.0, 0.0])
+        right = np.cross(view_dir, ref_up)
+        right /= np.linalg.norm(right)
+        up_perp = np.cross(right, view_dir)
+        up_perp /= np.linalg.norm(up_perp)
+
+        glColor3f(*JAMMER_CIRCLE_COLOR)
+        glBegin(GL_LINES)
+        for i in range(0, num_seg, 2):
+            theta = 2.0 * np.pi * i / num_seg
+            theta2 = 2.0 * np.pi * (i + 1) / num_seg
+            p1 = pos + radius * (np.cos(theta) * right + np.sin(theta) * up_perp)
+            p2 = pos + radius * (np.cos(theta2) * right + np.sin(theta2) * up_perp)
+            glVertex3f(p1[0], p1[1], p1[2])
+            glVertex3f(p2[0], p2[1], p2[2])
+        glEnd()
+
+        # -- Cylinder body --
+        cyl_seg = 12
+        cyl_r = jammer.cylinder_radius
+        cyl_h = jammer.cylinder_height
+        glColor3f(*JAMMER_BODY_COLOR)
+        glBegin(GL_LINES)
+        for i in range(cyl_seg):
+            theta = 2.0 * np.pi * i / cyl_seg
+            bx = cyl_r * np.cos(theta)
+            by = cyl_r * np.sin(theta)
+            # Vertical line
+            glVertex3f(pos[0] + bx, pos[1] + by, pos[2])
+            glVertex3f(pos[0] + bx, pos[1] + by, pos[2] + cyl_h)
+            # Bottom circle segment
+            b2 = 2.0 * np.pi * ((i + 1) % cyl_seg) / cyl_seg
+            glVertex3f(pos[0] + cyl_r * np.cos(theta), pos[1] + cyl_r * np.sin(theta), pos[2])
+            glVertex3f(pos[0] + cyl_r * np.cos(b2), pos[1] + cyl_r * np.sin(b2), pos[2])
+            # Top circle segment
+            glVertex3f(pos[0] + cyl_r * np.cos(theta), pos[1] + cyl_r * np.sin(theta), pos[2] + cyl_h)
+            glVertex3f(pos[0] + cyl_r * np.cos(b2), pos[1] + cyl_r * np.sin(b2), pos[2] + cyl_h)
+        glEnd()
+
+        # -- Blinking dot on top --
+        blink_on = (int(time.time() * 2) % 2) == 0
+        if blink_on:
+            glColor3f(*JAMMER_BLINK_COLOR_ON)
+        else:
+            glColor3f(*JAMMER_BLINK_COLOR_OFF)
+        glPointSize(8.0)
+        glBegin(GL_POINTS)
+        glVertex3f(top[0], top[1], top[2])
+        glEnd()
+        glPointSize(1.0)
 
     # -- motor labels (projected to screen coordinates) -------------------------
     def _project_motor_labels(self, motor_points: List[np.ndarray]) -> None:
@@ -467,6 +567,112 @@ class Renderer:
             x = margin + i * (bar_width + gap)
             draw_text(str(i + 1), x + bar_width * 0.3, margin - 2, 6.0, 9.0, 1.5,
                        self._segment_drawer())
+        glEnd()
+
+    def _draw_minimap(self, jammers: List[Jammer]) -> None:
+        uav_pos = self.uav.body.position
+        rpy = self.uav.body.attitude_rpy()
+        uav_yaw = rpy[2]
+
+        map_size = MINIMAP_SIZE
+        margin = MINIMAP_MARGIN
+        extent = MINIMAP_EXTENT
+        scale = map_size / (2.0 * extent)
+
+        mx = self.hud_width - map_size - margin
+        my = margin
+        cx = mx + map_size / 2.0
+        cy = my + map_size / 2.0
+
+        # Enable scissor to clip content to minimap bounds
+        glEnable(GL_SCISSOR_TEST)
+        glScissor(mx, my, map_size, map_size)
+
+        # Background fill
+        glColor3f(*MINIMAP_BG_COLOR)
+        glBegin(GL_LINES)
+        step = 2
+        for yy in range(int(my) + 1, int(my + map_size), step):
+            glVertex2f(mx, yy)
+            glVertex2f(mx + map_size, yy)
+        glEnd()
+
+        cos_yaw = np.cos(uav_yaw)
+        sin_yaw = np.sin(uav_yaw)
+
+        # Jammers
+        for jammer in jammers:
+            dx = jammer.position[0] - uav_pos[0]
+            dy = jammer.position[1] - uav_pos[1]
+            jx = cx + dx * scale
+            jy = cy + dy * scale
+
+            # Range circle
+            r_px = jammer.radius * scale
+            num_seg = 36
+            glColor3f(*JAMMER_CIRCLE_COLOR)
+            glBegin(GL_LINES)
+            for i in range(0, num_seg, 2):
+                a = 2.0 * np.pi * i / num_seg
+                b = 2.0 * np.pi * (i + 1) / num_seg
+                glVertex2f(jx + r_px * np.cos(a), jy + r_px * np.sin(a))
+                glVertex2f(jx + r_px * np.cos(b), jy + r_px * np.sin(b))
+            glEnd()
+
+            # Jammer dot
+            glColor3f(*JAMMER_BODY_COLOR)
+            glPointSize(4.0)
+            glBegin(GL_POINTS)
+            glVertex2f(jx, jy)
+            glEnd()
+
+        glPointSize(1.0)
+
+        # UAV icon: motor circles at fixed icon radius, rotated by yaw
+        for i, motor in enumerate(self.uav.motors):
+            mb = motor.position_body
+            angle = np.arctan2(mb[1], mb[0])
+            total_angle = angle + uav_yaw
+            px = cx + MINIMAP_MOTOR_RADIUS_PX * np.cos(total_angle)
+            py = cy + MINIMAP_MOTOR_RADIUS_PX * np.sin(total_angle)
+
+            glColor3f(*UAV_MOTOR_COLORS[i])
+            glBegin(GL_LINE_LOOP)
+            for j in range(8):
+                a = 2.0 * np.pi * j / 8
+                glVertex2f(px + MINIMAP_MOTOR_DOT_RADIUS * np.cos(a),
+                           py + MINIMAP_MOTOR_DOT_RADIUS * np.sin(a))
+            glEnd()
+
+        # X at center (body axes, rotated by yaw)
+        arm = MINIMAP_X_ARM
+        glColor3f(*MINIMAP_UAV_COLOR)
+        glBegin(GL_LINES)
+        glVertex2f(cx - arm * cos_yaw, cy - arm * sin_yaw)
+        glVertex2f(cx + arm * cos_yaw, cy + arm * sin_yaw)
+        glVertex2f(cx + arm * sin_yaw, cy - arm * cos_yaw)
+        glVertex2f(cx - arm * sin_yaw, cy + arm * cos_yaw)
+        glEnd()
+
+        # Disable scissor, draw border on top (always complete)
+        glDisable(GL_SCISSOR_TEST)
+        glColor3f(*MINIMAP_BORDER_COLOR)
+        glBegin(GL_LINE_LOOP)
+        glVertex2f(mx, my)
+        glVertex2f(mx + map_size, my)
+        glVertex2f(mx + map_size, my + map_size)
+        glVertex2f(mx, my + map_size)
+        glEnd()
+
+    def _draw_pause_overlay(self, jammer_count: int) -> None:
+        cx = self.hud_width / 2.0
+        cy = self.hud_height / 2.0
+        cw, ch, sp = 10.0, 14.0, 3.0
+        text = "PAUSED"
+        glColor3f(1.0, 1.0, 0.5)
+        glBegin(GL_LINES)
+        draw_text(text, cx - len(text) * (cw + sp) / 2.0, cy - ch / 2.0, cw, ch, sp,
+                   self._segment_drawer())
         glEnd()
 
     @staticmethod

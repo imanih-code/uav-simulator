@@ -21,7 +21,7 @@ from uavsim.physics.rigid_body import RigidBody
 
 # Half the side length of the square world grid. The UAV cannot fly beyond
 # [-WORLD_EXTENT_HALF, WORLD_EXTENT_HALF] in X or Y.
-WORLD_EXTENT_HALF = 50
+WORLD_EXTENT_HALF = 200
 
 # Simple friction coefficient applied to horizontal velocity while resting
 # on the ground (landing gear grip), per second of contact.
