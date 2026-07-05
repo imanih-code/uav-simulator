@@ -47,6 +47,8 @@ GROUND_COLOR = (0.2, 0.25, 0.3)
 GROUND_MAJOR_COLOR = (0.3, 0.4, 0.5)
 GROUND_AXIS_COLOR = (0.6, 0.3, 0.3)
 UAV_CENTER_COLOR = (1.0, 0.0, 0.0)
+UAV_BILLBOARD_CIRCLE_COLOR = (1.0, 1.0, 1.0)  # white, camera-facing circle
+UAV_CHASSIS_CIRCLE_COLOR = (1.0, 1.0, 1.0)    # white, chassis-tilted circle
 UAV_MOTOR_COLORS = [
     (1.0, 1.0, 0.0),   # 0 FR → amarillo
     (0.0, 1.0, 1.0),   # 1 BR → cyan
@@ -86,7 +88,7 @@ class Renderer:
             0.0, 0.0, 1.0,
         )
         self._draw_ground()
-        motor_points = self._draw_uav()
+        motor_points = self._draw_uav(camera_eye)
         self._project_motor_labels(motor_points)
 
     def draw_hud(self, snapshot: HUDSnapshot) -> None:
@@ -131,31 +133,110 @@ class Renderer:
 
         glEnd()
 
-    def _draw_uav(self) -> List[np.ndarray]:
+    def _draw_uav(self, camera_eye: np.ndarray) -> List[np.ndarray]:
         center = self.uav.body.position
         motor_points = self.uav.motor_world_positions()
+        num_segments = 24
+        radius = 0.10
 
+        # -- Camera-facing billboard circle (always faces the viewer) --
+        view_dir = camera_eye - center
+        view_dist = np.linalg.norm(view_dir)
+        if view_dist < 1e-8:
+            view_dir = np.array([0.0, 0.0, 1.0])
+        else:
+            view_dir /= view_dist
+        ref_up = np.array([0.0, 0.0, 1.0])
+        if abs(np.dot(view_dir, ref_up)) > 0.99:
+            ref_up = np.array([0.0, 1.0, 0.0])
+        right = np.cross(view_dir, ref_up)
+        right /= np.linalg.norm(right)
+        up_perp = np.cross(right, view_dir)
+        up_perp /= np.linalg.norm(up_perp)
+
+        glColor3f(*UAV_BILLBOARD_CIRCLE_COLOR)
+        glBegin(GL_LINE_LOOP)
+        for i in range(num_segments):
+            theta = 2.0 * np.pi * i / num_segments
+            p = center + radius * (np.cos(theta) * right + np.sin(theta) * up_perp)
+            glVertex3f(p[0], p[1], p[2])
+        glEnd()
+
+        # -- Chassis-aligned horizontal circle (tilts with the UAV) --
+        chassis_radius = 0.12
+        glColor3f(*UAV_CHASSIS_CIRCLE_COLOR)
+        glBegin(GL_LINE_LOOP)
+        for i in range(num_segments):
+            theta = 2.0 * np.pi * i / num_segments
+            local_p = np.array([chassis_radius * np.cos(theta), chassis_radius * np.sin(theta), 0.0])
+            world_p = center + self.uav.body.orientation.apply(local_p)
+            glVertex3f(world_p[0], world_p[1], world_p[2])
+        glEnd()
+
+        # -- Up arrow (UAV local +Z direction, shows which side is top) --
+        arrow_len = 0.28
+        arrow_head = 0.06
+        up_dir = self.uav.body.orientation.apply(np.array([0.0, 0.0, 1.0]))
+        tip = center + up_dir * arrow_len
+        glColor3f(1.0, 1.0, 1.0)
+        glBegin(GL_LINES)
+        # Dashed shaft
+        dash_len = 0.03
+        gap_len = 0.02
+        total = 0.0
+        while total + dash_len < arrow_len - arrow_head:
+            a = center + up_dir * total
+            b = center + up_dir * (total + dash_len)
+            glVertex3f(a[0], a[1], a[2])
+            glVertex3f(b[0], b[1], b[2])
+            total += dash_len + gap_len
+        # Arrowhead: two lines at the tip
+        for sign in (-1, 1):
+            head_local = np.array([sign * arrow_head, 0.0, -arrow_head])
+            head_world = tip + self.uav.body.orientation.apply(head_local)
+            glVertex3f(tip[0], tip[1], tip[2])
+            glVertex3f(head_world[0], head_world[1], head_world[2])
+        glEnd()
+
+        # -- Motor circles (one per motor, tilt with the UAV) --
+        motor_radius = 0.08
+        for i, mpos in enumerate(motor_points):
+            glColor3f(*UAV_MOTOR_COLORS[i])
+            glBegin(GL_LINE_LOOP)
+            for j in range(num_segments):
+                theta = 2.0 * np.pi * j / num_segments
+                local_p = np.array([motor_radius * np.cos(theta), motor_radius * np.sin(theta), 0.0])
+                world_p = mpos + self.uav.body.orientation.apply(local_p)
+                glVertex3f(world_p[0], world_p[1], world_p[2])
+            glEnd()
+
+        # -- Arms connecting center to motors --
         glColor3f(*UAV_ARM_COLOR)
         glBegin(GL_LINES)
         for point in motor_points:
             glVertex3f(center[0], center[1], center[2])
             glVertex3f(point[0], point[1], point[2])
-        # Draw a cross shape for better visibility
+        glEnd()
+
+        # -- Cross at the center --
         arm = 0.15
         glColor3f(0.8, 0.8, 0.8)
+        glBegin(GL_LINES)
         glVertex3f(center[0] - arm, center[1], center[2])
         glVertex3f(center[0] + arm, center[1], center[2])
         glVertex3f(center[0], center[1] - arm, center[2])
         glVertex3f(center[0], center[1] + arm, center[2])
         glEnd()
 
-        glPointSize(10.0)
+        # -- Center point --
+        glPointSize(6.0)
         glColor3f(*UAV_CENTER_COLOR)
         glBegin(GL_POINTS)
         glVertex3f(center[0], center[1], center[2])
         glEnd()
 
-        glPointSize(8.0)
+        # -- Motor points --
+        glPointSize(4.0)
         glBegin(GL_POINTS)
         for i, point in enumerate(motor_points):
             glColor3f(*UAV_MOTOR_COLORS[i])
