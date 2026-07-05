@@ -55,6 +55,7 @@ _ARROW_KEY_CODES = {
 class InputState:
     quit: bool = False
     toggle_camera_mode: bool = False
+    reset: bool = False
     motor_keys: Set[str] = field(default_factory=set)
     arrow_keys: Set[str] = field(default_factory=set)
     mouse_delta: Tuple[float, float] = (0.0, 0.0)
@@ -100,6 +101,8 @@ class Window:
                     state.quit = True
                 elif event.key == pygame.K_v:
                     state.toggle_camera_mode = True
+                elif event.key == pygame.K_BACKSPACE:
+                    state.reset = True
 
         pressed = pygame.key.get_pressed()
         state.motor_keys = {name for name, code in _MOTOR_KEY_CODES.items() if pressed[code]}

@@ -12,8 +12,8 @@ from dataclasses import dataclass
 @dataclass
 class Battery:
     charge_percent: float = 100.0
-    idle_drain_rate: float = 0.02     # %/sec drained even at zero throttle
-    load_drain_rate: float = 0.5      # %/sec drained at full combined throttle
+    idle_drain_rate: float = 0.01     # %/sec drained even at zero throttle
+    load_drain_rate: float = 0.15     # %/sec drained at full combined throttle
 
     def update(self, dt: float, total_throttle: float, max_total_throttle: float) -> None:
         """Drain the battery based on how hard the motors are working.

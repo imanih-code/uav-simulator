@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import List, Tuple
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from uavsim.comms.command import Command, CommandOpcode
 from uavsim.comms.gateway import CommGatewayInput, CommGatewayOutput
@@ -106,9 +107,14 @@ class UAV:
         self._armed = True
         self.is_grounded = True
         self._command_log: deque = deque(maxlen=4)
+        self._was_airborne = False
+        self._health = 100.0
+        self._dead = False
 
     # -- command handling --------------------------------------------------
     def _process_incoming_commands(self) -> None:
+        if self._dead:
+            return
         for raw_packet in self._command_input.receive_all():
             try:
                 command = Command.decode(raw_packet)
@@ -120,6 +126,8 @@ class UAV:
             self._apply_command(command)
 
     def _apply_command(self, command: Command) -> None:
+        if self._dead:
+            return
         self._command_log.append((int(command.opcode), command.motor_id, True))
         if command.opcode == CommandOpcode.THROTTLE_UP:
             self.motors[command.motor_id].increase_throttle()
@@ -147,9 +155,20 @@ class UAV:
 
     # -- physics -------------------------------------------------------------
     def _integrate_physics(self, dt: float) -> None:
+        if self._dead:
+            for motor in self.motors:
+                motor.throttle = 0.0
+            self.body.apply_body_forces(dt, [], [], None)
+            self.is_grounded = apply_ground_contact(self.body, self.ground, dt)
+            apply_world_bounds(self.body, WORLD_EXTENT_HALF)
+            return
+
         if not self._armed:
             for motor in self.motors:
                 motor.throttle = 0.0
+
+        # Pre-contact velocity for crash detection
+        pre_vel_z = self.body.velocity[2]
 
         # Hover correction: damps upward velocity so the drone doesn't
         # runaway when throttle is above hover level. Does NOT oppose
@@ -160,17 +179,31 @@ class UAV:
             for m in self.motors
         ]
 
+        # Damage reduces effective max thrust
+        dmg_factor = 1.0 - (100.0 - self._health) * 0.005  # 1.0 at 100% hp, 0.5 at 0% hp
+        effective_max = self.config.max_thrust_per_motor * dmg_factor
+
         points_body = [motor.position_body for motor in self.motors]
         forces_body = [
-            np.array([0.0, 0.0, t * m.max_thrust])
-            for t, m in zip(effective_throttles, self.motors)
+            np.array([0.0, 0.0, t * effective_max])
+            for t, _ in zip(effective_throttles, self.motors)
         ]
         yaw_reaction_torque = np.array([
             0.0, 0.0,
             sum(-m.spin_direction * 0.02 * t for t, m in zip(effective_throttles, self.motors)),
         ])
         self.body.apply_body_forces(dt, forces_body, points_body, yaw_reaction_torque)
+
+        # Crash detection
+        was_grounded = self.is_grounded
         self.is_grounded = apply_ground_contact(self.body, self.ground, dt)
+        if not was_grounded and self.is_grounded and pre_vel_z < -3.0:
+            impact = abs(pre_vel_z) - 3.0
+            damage = impact * 6.0
+            self._health = max(0.0, self._health - damage)
+            if self._health <= 0.0:
+                self._dead = True
+
         apply_world_bounds(self.body, WORLD_EXTENT_HALF)
 
     # -- battery ---------------------------------------------------------------
@@ -195,6 +228,7 @@ class UAV:
             battery_percent=self.battery.charge_percent,
             mass=self.config.total_mass,
             command_log=tuple(self._command_log),
+            health_percent=self._health,
         )
         self._telemetry_output.send(packet.encode())
 
@@ -207,6 +241,23 @@ class UAV:
         self._integrate_physics(dt)
         self._update_battery(dt)
         self._send_telemetry_if_due(dt)
+
+    def reset(self) -> None:
+        """Reset the UAV to its initial parked-on-ground state."""
+        self.body.position = np.array([0.0, 0.0, self.ground.ground_z])
+        self.body.velocity = np.zeros(3)
+        self.body.orientation = Rotation.identity()
+        self.body.angular_velocity_body = np.zeros(3)
+        for motor in self.motors:
+            motor.throttle = 0.0
+        self.battery.charge_percent = 100.0
+        self._health = 100.0
+        self._dead = False
+        self.is_grounded = True
+        self._command_log.clear()
+        self._was_airborne = False
+        # Drain any pending command packets
+        self._command_input.receive_all()
 
     def motor_world_positions(self) -> List[np.ndarray]:
         """Motor mount points in world space -- used only by the renderer."""

@@ -228,7 +228,8 @@ class Renderer:
     @staticmethod
     def _telemetry_lines(snapshot: HUDSnapshot) -> List[str]:
         if not snapshot.has_telemetry:
-            return ["BAT:--", "ALT:--", "MASS:--", "POSX:--", "POSY:--",
+            return ["BAT:--", "ALT:--", "MASS:--", "HP:--",
+                    "POSX:--", "POSY:--",
                     "ROL:--", "PIT:--", "YAW:--"]
 
         x, y, z = snapshot.position
@@ -237,6 +238,7 @@ class Renderer:
             f"BAT:{snapshot.battery_percent:.0f}%",
             f"ALT:{z:.1f}",
             f"MASS:{snapshot.mass_kg:.2f}",
+            f"HP:{snapshot.health_percent:.0f}%" if snapshot.health_percent is not None else "HP:--",
             f"POSX:{x:.1f}",
             f"POSY:{y:.1f}",
             f"ROL:{roll:.1f}",
@@ -251,7 +253,7 @@ class Renderer:
         margin = 14
         char_w, char_h, spacing = 6.0, 9.0, 1.5
         line_h = char_h + 4
-        telemetry_height = 8 * (10 + 6)
+        telemetry_height = 9 * (10 + 6)
         # Start below the telemetry readout so no overlap
         y = self.hud_height - margin - 10 - telemetry_height - 12 - (len(snapshot.command_log)) * line_h
 

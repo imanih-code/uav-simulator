@@ -80,6 +80,8 @@ def main() -> None:
                 break
             if input_state.toggle_camera_mode:
                 camera.toggle_mode(uav.body.position)
+            if input_state.reset:
+                uav.reset()
 
             operator.handle_pressed_keys(input_state.motor_keys)
             uav.update(dt)

@@ -25,6 +25,7 @@ class HUDSnapshot:
     attitude_deg: Optional[Tuple[float, float, float]] = None
     motor_throttle: Optional[Tuple[float, float, float, float]] = None
     battery_percent: Optional[float] = None
+    health_percent: Optional[float] = None
     mass_kg: Optional[float] = None
 
     uplink_bandwidth_bps: float = 0.0
@@ -89,6 +90,7 @@ class HUD:
             attitude_deg=attitude_deg,
             motor_throttle=tuple(packet.motor_throttle.tolist()),
             battery_percent=packet.battery_percent,
+            health_percent=packet.health_percent,
             mass_kg=packet.mass,
             uplink_bandwidth_bps=uplink_bandwidth,
             downlink_bandwidth_bps=downlink_bandwidth,
