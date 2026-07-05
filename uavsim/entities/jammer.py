@@ -15,10 +15,10 @@ class Jammer:
     cylinder_radius: float = 0.12
 
     def noise_at(self, pos: np.ndarray) -> float:
-        dist = np.linalg.norm(pos[:2] - self.position[:2])
+        dist = np.linalg.norm(pos - self.position)
         if dist >= self.radius:
             return 0.0
         return self.noise_level * (1.0 - dist / self.radius)
 
     def is_in_range(self, pos: np.ndarray) -> bool:
-        return np.linalg.norm(pos[:2] - self.position[:2]) <= self.radius
+        return np.linalg.norm(pos - self.position) <= self.radius

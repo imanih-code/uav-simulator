@@ -105,6 +105,7 @@ class UAV:
         self._telemetry_output = telemetry_output
         self._time_since_last_telemetry = 0.0
         self._raw_throttle: List[float] = [0.0, 0.0, 0.0, 0.0]
+        self._last_motor_cmd_time: List[float] = [0.0, 0.0, 0.0, 0.0]
         self._armed = True
         self.is_grounded = True
         self._command_log: deque = deque(maxlen=10)
@@ -134,16 +135,22 @@ class UAV:
             self._raw_throttle[command.motor_id] = min(
                 1.0, self._raw_throttle[command.motor_id] + self.motors[0].throttle_step_up
             )
+            self._last_motor_cmd_time[command.motor_id] = time.time()
         elif command.opcode == CommandOpcode.THROTTLE_DOWN:
             self._raw_throttle[command.motor_id] = max(
                 0.0, self._raw_throttle[command.motor_id] - self.motors[0].throttle_step_down
             )
+            self._last_motor_cmd_time[command.motor_id] = time.time()
         elif command.opcode == CommandOpcode.THROTTLE_UP_ALL:
+            now = time.time()
             for i in range(4):
                 self._raw_throttle[i] = min(1.0, self._raw_throttle[i] + self.motors[0].throttle_step_up)
+                self._last_motor_cmd_time[i] = now
         elif command.opcode == CommandOpcode.THROTTLE_DOWN_ALL:
+            now = time.time()
             for i in range(4):
                 self._raw_throttle[i] = max(0.0, self._raw_throttle[i] - self.motors[0].throttle_step_down)
+                self._last_motor_cmd_time[i] = now
         elif command.opcode == CommandOpcode.ARM:
             self._armed = True
         elif command.opcode == CommandOpcode.DISARM:
@@ -154,11 +161,12 @@ class UAV:
                 self._raw_throttle[i] = 0.0
 
     # -- hover controller ----------------------------------------------------
-
-    # -- hover controller ----------------------------------------------------
     # Gain that opposes vertical velocity to produce a natural altitude hold.
     # Higher values = stiffer hold; too high can oscillate.
     _HOVER_GAIN = 0.4
+    _MOTOR_TIMEOUT = 0.15
+    _P_GAIN = 0.15
+    _D_GAIN = 0.05
 
     # -- physics -------------------------------------------------------------
     def _integrate_physics(self, dt: float) -> None:
@@ -171,8 +179,23 @@ class UAV:
             return
 
         if self._armed:
+            now = time.time()
+            min_raw = min(self._raw_throttle)
+            rpy = self.body.attitude_rpy()
+            w = self.body.angular_velocity_body
+            roll_corr = np.clip(rpy[0] * self._P_GAIN + w[0] * self._D_GAIN, -0.10, 0.10)
+            pitch_corr = np.clip(rpy[1] * self._P_GAIN + w[1] * self._D_GAIN, -0.10, 0.10)
+            corrections = np.array([
+                +roll_corr + pitch_corr,
+                +roll_corr - pitch_corr,
+                -roll_corr - pitch_corr,
+                -roll_corr + pitch_corr,
+            ])
             for i in range(4):
-                self.motors[i].throttle = self._raw_throttle[i]
+                if now - self._last_motor_cmd_time[i] >= self._MOTOR_TIMEOUT:
+                    self.motors[i].throttle = np.clip(min_raw + corrections[i], 0.0, 1.0)
+                else:
+                    self.motors[i].throttle = self._raw_throttle[i]
         else:
             for motor in self.motors:
                 motor.throttle = 0.0
