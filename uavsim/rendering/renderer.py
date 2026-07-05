@@ -56,6 +56,8 @@ UAV_MOTOR_COLORS = [
 UAV_ARM_COLOR = (0.6, 0.6, 0.6)
 
 HUD_TEXT_COLOR = (0.75, 1.0, 0.8)
+HUD_LOG_OK_COLOR = (0.3, 1.0, 0.4)     # verde
+HUD_LOG_BAD_COLOR = (1.0, 0.3, 0.3)     # rojo
 HUD_PANEL_BORDER_COLOR = (0.4, 0.6, 0.5)
 HUD_WAVEFORM_COLOR = (0.3, 1.0, 0.5)
 HUD_BAR_COLOR = (0.9, 0.9, 0.9)
@@ -91,6 +93,7 @@ class Renderer:
         self._begin_hud_overlay()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
+        self._draw_command_log(snapshot)
         self._draw_signal_panels(snapshot)
         if snapshot.has_telemetry and snapshot.motor_throttle is not None:
             self._draw_throttle_bars(snapshot.motor_throttle)
@@ -240,6 +243,25 @@ class Renderer:
             f"PIT:{pitch:.1f}",
             f"YAW:{yaw:.1f}",
         ]
+
+    # -- HUD: command log -------------------------------------------------------
+    def _draw_command_log(self, snapshot: HUDSnapshot) -> None:
+        if not snapshot.command_log:
+            return
+        margin = 14
+        char_w, char_h, spacing = 6.0, 9.0, 1.5
+        line_h = char_h + 4
+        telemetry_height = 8 * (10 + 6)
+        # Start below the telemetry readout so no overlap
+        y = self.hud_height - margin - 10 - telemetry_height - 12 - (len(snapshot.command_log)) * line_h
+
+        glBegin(GL_LINES)
+        for label, valid in snapshot.command_log:
+            y += line_h
+            color = HUD_LOG_OK_COLOR if valid else HUD_LOG_BAD_COLOR
+            glColor3f(*color)
+            draw_text(label, margin, y, char_w, char_h, spacing, self._segment_drawer())
+        glEnd()
 
     # -- HUD: TX/RX oscilloscope-style signal panels ----------------------------
     def _draw_signal_panels(self, snapshot: HUDSnapshot) -> None:

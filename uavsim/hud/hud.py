@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -33,6 +33,13 @@ class HUDSnapshot:
     downlink_signal: Tuple[Tuple[float, bytes], ...] = field(default_factory=tuple)
     now: float = 0.0
 
+    command_log: Tuple[Tuple[str, bool], ...] = ()  # (label, is_valid)
+
+_OPCODE_LABELS = {
+    0: "THR+", 1: "THR-", 2: "ARM", 3: "DSRM", 4: "CUT",
+    5: "THR+A", 6: "THR-A",
+}
+
 
 class HUD:
     def __init__(self, operator: UAVOperator) -> None:
@@ -52,6 +59,17 @@ class HUD:
             self._operator.telemetry_input.recent_transmissions(SIGNAL_WINDOW_SECONDS)
         )
 
+        command_log = []
+        if packet is not None:
+            for opcode, motor_id, valid in packet.command_log:
+                if not valid:
+                    command_log.append(("BAD", False))
+                else:
+                    label = _OPCODE_LABELS.get(opcode, f"OP{opcode}")
+                    if motor_id < 4:
+                        label += str(motor_id + 1)
+                    command_log.append((label, True))
+
         if packet is None:
             return HUDSnapshot(
                 has_telemetry=False,
@@ -60,6 +78,7 @@ class HUD:
                 uplink_signal=uplink_signal,
                 downlink_signal=downlink_signal,
                 now=now,
+                command_log=tuple(command_log),
             )
 
         attitude_deg = tuple(np.degrees(packet.attitude_rpy).tolist())
@@ -76,4 +95,5 @@ class HUD:
             uplink_signal=uplink_signal,
             downlink_signal=downlink_signal,
             now=now,
+            command_log=tuple(command_log),
         )

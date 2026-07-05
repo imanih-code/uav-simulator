@@ -13,8 +13,9 @@ The UAV does not know about keyboards or rendering. It only:
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 
@@ -104,6 +105,7 @@ class UAV:
         self._time_since_last_telemetry = 0.0
         self._armed = True
         self.is_grounded = True
+        self._command_log: deque = deque(maxlen=4)
 
     # -- command handling --------------------------------------------------
     def _process_incoming_commands(self) -> None:
@@ -111,10 +113,14 @@ class UAV:
             try:
                 command = Command.decode(raw_packet)
             except ValueError:
-                continue  # corrupted-but-CRC-valid-by-luck packet; drop it
+                self._command_log.append(
+                    (CommandOpcode.EMERGENCY_CUT, 0, False)
+                )
+                continue
             self._apply_command(command)
 
     def _apply_command(self, command: Command) -> None:
+        self._command_log.append((int(command.opcode), command.motor_id, True))
         if command.opcode == CommandOpcode.THROTTLE_UP:
             self.motors[command.motor_id].increase_throttle()
         elif command.opcode == CommandOpcode.THROTTLE_DOWN:
@@ -188,6 +194,7 @@ class UAV:
             motor_throttle=np.array([m.throttle for m in self.motors]),
             battery_percent=self.battery.charge_percent,
             mass=self.config.total_mass,
+            command_log=tuple(self._command_log),
         )
         self._telemetry_output.send(packet.encode())
 
