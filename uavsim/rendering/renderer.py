@@ -68,7 +68,6 @@ HUD_BAR_COLOR = (0.9, 0.9, 0.9)
 GROUND_GRID_SPAN = WORLD_EXTENT_HALF
 GROUND_MAJOR_STEP = 5
 
-_SIGNAL_BITS_SAMPLED = 8
 _SIGNAL_BIT_DURATION = 0.01  # seconds per drawn bit
 
 
@@ -398,8 +397,8 @@ class Renderer:
         bit_dur = _SIGNAL_BIT_DURATION
 
         # -- Raw analog waveform (upper portion) --
-        raw_low_y = y + height * 0.60
-        raw_high_y = y + height * 0.88
+        raw_low_y = y + height * 0.46
+        raw_high_y = y + height * 0.90
         raw_mid_y = (raw_low_y + raw_high_y) / 2.0
         raw_amp = (raw_high_y - raw_low_y) / 2.0
         glColor3f(*HUD_RAW_SIGNAL_COLOR)
@@ -423,8 +422,8 @@ class Renderer:
         glEnd()
 
         # -- Demodulated digital bits (lower portion) --
-        low_y = y + height * 0.18
-        high_y = y + height * 0.55
+        low_y = y + height * 0.06
+        high_y = y + height * 0.38
         glColor3f(*HUD_WAVEFORM_COLOR)
         glBegin(GL_LINES)
         for seg in _waveform_segments(transmissions, now, window, label):
@@ -495,50 +494,79 @@ def _waveform_segments(
     Tracks the last signal level per *key* across calls via a function
     attribute so each panel (TX/RX) keeps its own state and the waveform
     doesn't jump to 0 at the left edge every frame.
+
+    Processes ALL bytes of each payload, not just the first byte.
+    After a gap of 3+ bit_durations the line returns to level 0 (idle).
     """
     window_start = now - window_seconds
     state: dict = getattr(_waveform_segments, '_state', {})
     segments: List[Tuple[float, int, float, int]] = []
     prev_t = 0.0
     prev_l = state.get(key, 0)
+    idle_timeout = 3.0 * _SIGNAL_BIT_DURATION
+    bit_dur = _SIGNAL_BIT_DURATION
 
     for timestamp, payload in transmissions:
         if not payload:
             continue
         t0 = timestamp - window_start
-        byte0_end = t0 + 8 * _SIGNAL_BIT_DURATION
-        if byte0_end < 0.0:
-            continue  # entire first byte is before the window
+        all_bytes_end = t0 + len(payload) * 8 * bit_dur
+        if all_bytes_end < 0.0:
+            continue
 
-        # Gap from previous position → horizontal at current level,
-        # clamped so we never draw before time 0.
-        gap_end = max(0.0, t0)
-        if gap_end > prev_t:
-            segments.append((prev_t, prev_l, gap_end, prev_l))
-
-        first_byte = payload[0]
-        bits = [(first_byte >> i) & 1 for i in range(_SIGNAL_BITS_SAMPLED - 1, -1, -1)]
-
-        for i, bit in enumerate(bits):
-            t_start = t0 + i * _SIGNAL_BIT_DURATION
-            t_end = t_start + _SIGNAL_BIT_DURATION
-            if t_start > window_seconds:
+        for byte_idx, byte in enumerate(payload):
+            byte_start = t0 + byte_idx * 8 * bit_dur
+            if byte_start > window_seconds:
                 break
-            if t_end < 0.0:
-                continue  # this specific bit is before the window
-            t_start_clamped = max(0.0, t_start)
-            t_end_clamped = min(window_seconds, t_end)
-            if t_start_clamped > t_end_clamped:
+            byte_end = byte_start + 8 * bit_dur
+            if byte_end < 0.0:
                 continue
-            if bit != prev_l:
-                segments.append((t_start_clamped, prev_l, t_start_clamped, bit))
-            segments.append((t_start_clamped, bit, t_end_clamped, bit))
-            prev_l = bit
-            prev_t = t_end_clamped
 
-    # Fill remaining time to the end of the window
+            # Gap from previous position → horizontal at current level,
+            # clamped. If the gap exceeds idle_timeout, return to 0.
+            gap_end = max(0.0, byte_start)
+            if gap_end > prev_t:
+                gap = gap_end - prev_t
+                if gap > idle_timeout:
+                    hold_end = prev_t + idle_timeout
+                    segments.append((prev_t, prev_l, hold_end, prev_l))
+                    segments.append((hold_end, prev_l, hold_end, 0))
+                    if hold_end < gap_end:
+                        segments.append((hold_end, 0, gap_end, 0))
+                    prev_l = 0
+                else:
+                    segments.append((prev_t, prev_l, gap_end, prev_l))
+
+            bits = [(byte >> i) & 1 for i in range(7, -1, -1)]
+            for i, bit in enumerate(bits):
+                t_start = byte_start + i * bit_dur
+                t_end = t_start + bit_dur
+                if t_start > window_seconds:
+                    break
+                if t_end < 0.0:
+                    continue
+                t_start_clamped = max(0.0, t_start)
+                t_end_clamped = min(window_seconds, t_end)
+                if t_start_clamped > t_end_clamped:
+                    continue
+                if bit != prev_l:
+                    segments.append((t_start_clamped, prev_l, t_start_clamped, bit))
+                segments.append((t_start_clamped, bit, t_end_clamped, bit))
+                prev_l = bit
+                prev_t = t_end_clamped
+
+    # Fill remaining time to the end of the window.
+    # Return to level 0 if the idle gap exceeds idle_timeout.
     if prev_t < window_seconds:
-        segments.append((prev_t, prev_l, window_seconds, prev_l))
+        remaining = window_seconds - prev_t
+        if remaining > idle_timeout:
+            hold_end = prev_t + idle_timeout
+            segments.append((prev_t, prev_l, hold_end, prev_l))
+            segments.append((hold_end, prev_l, hold_end, 0))
+            segments.append((hold_end, 0, window_seconds, 0))
+            prev_l = 0
+        else:
+            segments.append((prev_t, prev_l, window_seconds, prev_l))
 
     state[key] = prev_l
     _waveform_segments._state = state

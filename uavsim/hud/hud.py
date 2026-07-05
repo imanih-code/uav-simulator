@@ -62,17 +62,21 @@ class HUD:
         # not what the Operator transmitted — so we read from the Rx side.
         uplink_bandwidth = self._uav_command_input.bandwidth_bps()
         downlink_bandwidth = self._operator.telemetry_input.bandwidth_bps()
+        # Request all available history (up to the channel's 3s prune) so
+        # multi-byte telemetry packets don't vanish at the left edge when
+        # their timestamp passes the display window cutoff — later bytes
+        # of the same packet may still be visible.
         uplink_signal = tuple(
-            self._uav_command_input.recent_transmissions(SIGNAL_WINDOW_SECONDS)
+            self._uav_command_input.recent_transmissions()
         )
         downlink_signal = tuple(
-            self._operator.telemetry_input.recent_transmissions(SIGNAL_WINDOW_SECONDS)
+            self._operator.telemetry_input.recent_transmissions()
         )
         uplink_raw = tuple(
-            self._uav_command_input.recent_raw_transmissions(SIGNAL_WINDOW_SECONDS)
+            self._uav_command_input.recent_raw_transmissions()
         )
         downlink_raw = tuple(
-            self._operator.telemetry_input.recent_raw_transmissions(SIGNAL_WINDOW_SECONDS)
+            self._operator.telemetry_input.recent_raw_transmissions()
         )
 
         command_log = []

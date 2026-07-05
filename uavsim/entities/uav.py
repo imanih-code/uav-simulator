@@ -104,6 +104,8 @@ class UAV:
         self._command_input = command_input
         self._telemetry_output = telemetry_output
         self._time_since_last_telemetry = 0.0
+        self._raw_throttle: List[float] = [0.0, 0.0, 0.0, 0.0]
+        self._last_pair_cmd_time: List[float] = [0.0, 0.0]
         self._armed = True
         self.is_grounded = True
         self._command_log: deque = deque(maxlen=4)
@@ -130,25 +132,54 @@ class UAV:
             return
         self._command_log.append((int(command.opcode), command.motor_id, True))
         if command.opcode == CommandOpcode.THROTTLE_UP:
-            self.motors[command.motor_id].increase_throttle()
+            self._raw_throttle[command.motor_id] = min(
+                1.0, self._raw_throttle[command.motor_id] + self.motors[0].throttle_step_up
+            )
+            self._mark_pair_active(command.motor_id)
         elif command.opcode == CommandOpcode.THROTTLE_DOWN:
-            self.motors[command.motor_id].decrease_throttle()
+            self._raw_throttle[command.motor_id] = max(
+                0.0, self._raw_throttle[command.motor_id] - self.motors[0].throttle_step_down
+            )
+            self._mark_pair_active(command.motor_id)
         elif command.opcode == CommandOpcode.THROTTLE_UP_ALL:
-            for motor in self.motors:
-                motor.increase_throttle()
+            for i in range(4):
+                self._raw_throttle[i] = min(1.0, self._raw_throttle[i] + self.motors[0].throttle_step_up)
         elif command.opcode == CommandOpcode.THROTTLE_DOWN_ALL:
-            for motor in self.motors:
-                motor.decrease_throttle()
+            for i in range(4):
+                self._raw_throttle[i] = max(0.0, self._raw_throttle[i] - self.motors[0].throttle_step_down)
         elif command.opcode == CommandOpcode.ARM:
             self._armed = True
         elif command.opcode == CommandOpcode.DISARM:
             self._armed = False
         elif command.opcode == CommandOpcode.EMERGENCY_CUT:
             self._armed = False
-            for motor in self.motors:
-                motor.throttle = 0.0
+            for i in range(4):
+                self._raw_throttle[i] = 0.0
 
-        # -- hover controller ----------------------------------------------------
+    def _mark_pair_active(self, motor_id: int) -> None:
+        pair = 0 if motor_id in (0, 2) else 1
+        self._last_pair_cmd_time[pair] = time.time()
+
+    # P+D attitude controller: auto-levels roll and pitch so the UAV
+    # naturally returns to level when the operator is not actively
+    # commanding a diagonal motor pair. Gains are tuned for the X airframe.
+    _ATTITUDE_P_GAIN = 0.4
+    _ATTITUDE_D_GAIN = 0.12
+    _ACTIVE_TIMEOUT = 0.15
+
+    def _attitude_corrections(self) -> np.ndarray:
+        rpy = self.body.attitude_rpy()
+        w = self.body.angular_velocity_body
+        roll_corr = np.clip(rpy[0] * self._ATTITUDE_P_GAIN + w[0] * self._ATTITUDE_D_GAIN, -1, 1)
+        pitch_corr = np.clip(rpy[1] * self._ATTITUDE_P_GAIN + w[1] * self._ATTITUDE_D_GAIN, -1, 1)
+        return np.array([
+            +roll_corr + pitch_corr,   # motor 0 (FR)
+            +roll_corr - pitch_corr,   # motor 1 (BR)
+            -roll_corr - pitch_corr,   # motor 2 (BL)
+            -roll_corr + pitch_corr,   # motor 3 (FL)
+        ])
+
+    # -- hover controller ----------------------------------------------------
     # Gain that opposes vertical velocity to produce a natural altitude hold.
     # Higher values = stiffer hold; too high can oscillate.
     _HOVER_GAIN = 0.4
@@ -163,7 +194,20 @@ class UAV:
             apply_world_bounds(self.body, WORLD_EXTENT_HALF)
             return
 
-        if not self._armed:
+        # Attitude stabilizer: P+D correction sets motor throttles from
+        # raw user input, except on diagonal pairs the user just commanded
+        # (150 ms timeout) where we pass raw throttle through unchanged.
+        if self._armed:
+            att_corr = self._attitude_corrections()
+            now = time.time()
+            for i in range(4):
+                pair = 0 if i in (0, 2) else 1
+                if now - self._last_pair_cmd_time[pair] >= self._ACTIVE_TIMEOUT:
+                    target = self._raw_throttle[i] + att_corr[i]
+                    self.motors[i].throttle = min(1.0, max(0.0, target))
+                else:
+                    self.motors[i].throttle = self._raw_throttle[i]
+        else:
             for motor in self.motors:
                 motor.throttle = 0.0
 
@@ -250,6 +294,8 @@ class UAV:
         self.body.angular_velocity_body = np.zeros(3)
         for motor in self.motors:
             motor.throttle = 0.0
+        self._raw_throttle = [0.0, 0.0, 0.0, 0.0]
+        self._last_pair_cmd_time = [0.0, 0.0]
         self.battery.charge_percent = 100.0
         self._health = 100.0
         self._dead = False
