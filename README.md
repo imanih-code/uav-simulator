@@ -1,19 +1,18 @@
 # UAVSIM
 
-Simulador de dron (UAV) en Python. Física real de 4 motores en configuración
-X, comunicación por comandos/telemetría codificados en bits, cámara de
-mundo libre/seguimiento, y un HUD con indicadores reales + gráficos de
-señal, todo renderizado con OpenGL usando solo puntos y líneas (sin
-texturas, sin fuentes externas).
+Python quadcopter (UAV) simulator. Real X-configuration 4-motor physics,
+bit-encoded command/telemetry comms, free-world/follow camera, and an HUD
+with live indicators + signal scopes — all rendered with OpenGL using only
+points and lines (no textures, no external fonts).
 
-Nada del movimiento del UAV está "programado" explícitamente: solo se
-calcula empuje por motor, se integra fuerza/torque sobre un cuerpo rígido,
-y el desplazamiento (traslación, pitch, roll, yaw) es un resultado emergente
-de esa física.
+None of the UAV's movement is explicitly scripted: thrust per motor is
+computed, force/torque is integrated over a rigid body, and the resulting
+motion (translation, pitch, roll, yaw) is an emergent outcome of that
+physics.
 
-## Instalación
+## Installation
 
-**1. GNU Radio** (no es un paquete de pip -- instalalo con el gestor de paquetes de tu sistema):
+**1. GNU Radio** (not a pip package — install via your system package manager):
 
 ```bash
 # Ubuntu/Debian
@@ -28,220 +27,226 @@ sudo pacman -S gnuradio
 # macOS (Homebrew)
 brew install gnuradio
 
-# O, multiplataforma, via conda:
+# Cross-platform via conda:
 conda install -c conda-forge gnuradio
 ```
 
-Verificá que quedó instalado y es importable desde el Python que vas a usar:
+Verify it's installed and importable from the Python you'll use:
 
 ```bash
 python3 -c "from gnuradio import gr, blocks, digital, channels; print(gr.version())"
 ```
 
-⚠️ **Si te tira un error de NumPy tipo "compiled using NumPy 1.x cannot be run in NumPy 2.x"**:
-el GNU Radio de tu distro está compilado contra NumPy 1.x. Bajá la versión de numpy de
-ese entorno (`pip install "numpy<2" --force-reinstall`) -- es lo que dice el
-`requirements.txt`. Esto es una limitación del paquete de GNU Radio de tu sistema, no
-de este proyecto.
+⚠️ **If you get a NumPy error like "compiled using NumPy 1.x cannot be run in NumPy 2.x"**:
+your distro's GNU Radio was compiled against NumPy 1.x. Downgrade numpy in
+that environment (`pip install "numpy<2" --force-reinstall`) — this is what
+`requirements.txt` pins. This is a limitation of your system's GNU Radio
+package, not of this project.
 
-**2. El resto de las dependencias, con pip:**
+**2. Remaining dependencies with pip:**
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # en Windows: .venv\Scripts\activate
+source .venv/bin/activate  # on Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Si usás un venv, asegurate de que GNU Radio sea visible desde adentro (los paquetes de
-sistema instalados via apt/dnf/pacman van a `/usr/lib/python3/dist-packages`, que los
-venv no siempre heredan -- si el import falla solo dentro del venv, corré `main.py` con
-el Python del sistema en vez de un venv, o creá el venv con `--system-site-packages`).
+If using a venv, make sure GNU Radio is visible from inside it (system
+packages go to `/usr/lib/python3/dist-packages`, which venvs don't always
+inherit — if the import fails only inside the venv, run `main.py` with the
+system Python instead, or create the venv with `--system-site-packages`).
 
-## Ejecutar
+## Run
 
 ```bash
 python main.py
 ```
 
-## Controles
+## Controls
 
-**Motores** — el dron es una X vista desde arriba, con 4 motores. Cada
-tecla numérica acelera un motor; la letra justo arriba de ella (en QWERTY)
-lo desacelera gradualmente hasta 0.
+**Motors** — the drone is an X shape viewed from above, with 4 motors. Each
+number key accelerates one motor; the letter directly above it (on QWERTY)
+decelerates it gradually down to 0.
 
-| Motor         | Acelerar | Desacelerar |
-|---------------|----------|-------------|
-| Front-right   | `1`      | `Q`         |
-| Back-right    | `2`      | `W`         |
-| Back-left     | `3`      | `E`         |
-| Front-left    | `4`      | `R`         |
+| Motor         | Accelerate | Decelerate |
+|---------------|-----------|------------|
+| Front-right   | `1`       | `Q`        |
+| Back-right    | `2`       | `W`        |
+| Back-left     | `3`       | `E`        |
+| Front-left    | `4`       | `R`        |
+| All 4         | `5`       | `T`        |
 
-El UAV **arranca posado en el suelo, quieto**. Si no le das suficiente
-empuje total (los 4 motores combinados superando su peso), simplemente se
-queda ahí — no cae, no se hunde. Recién despega cuando tú, como operador,
-le das el empuje necesario.
+The UAV **starts parked on the ground, at rest**. If you don't give it
+enough total thrust (all 4 motors combined exceeding its weight), it simply
+stays there — no falling, no sinking. It only takes off when you, the
+operator, give it enough thrust.
 
-**Cámara de mundo** (nunca primera persona — es un observador externo,
-nunca la vista del propio dron):
+**Camera** (never first-person — always an external observer):
 
-| Tecla         | Acción |
-|---------------|--------|
-| Flechas       | Modo FREE: mover la cámara. Modo FOLLOW: orbitar / zoom |
-| Mouse         | Rotar la vista (orbitar en FOLLOW, mirar alrededor en FREE) |
-| `V`           | Alternar entre FOLLOW (persigue al UAV, tipo GTA) y FREE (cámara de espectador, totalmente libre) |
-| `ESC`         | Salir |
+| Key          | Action |
+|--------------|--------|
+| Arrow keys   | FREE mode: move the camera. FOLLOW mode: orbit / zoom |
+| Mouse        | Rotate view (orbit in FOLLOW, look around in FREE) |
+| `V`          | Toggle between FOLLOW (chases the UAV, GTA-style) and FREE (spectator, fully free) |
+| `BACKSPACE`  | Reset the UAV to its initial parked state (position, battery, health, throttle) |
+| `ESC`        | Quit |
 
-Al presionar `V` la cámara no "salta": conserva el punto de vista actual y
-solo cambia cómo se controla desde ahí en adelante.
+When pressing `V` the camera doesn't "jump": it keeps the current viewpoint
+and only changes how it's controlled from there onward.
 
 ## HUD
 
-Todo lo que muestra el HUD sale de la señal que el UAV transmite
-periódicamente (o de las estadísticas propias de los canales), nunca de
-leer el UAV directamente — el `HUD` solo conversa con el `UAVOperator`.
+Everything the HUD shows comes from the signal the UAV periodically
+transmits (or from the channels' own statistics), never from reading the UAV
+directly — the `HUD` only talks to the `UAVOperator`.
 
-- **Batería** (`BAT`, %) — se descarga más rápido cuanto más empuje total
-  usan los motores.
-- **Altitud** (`ALT`, metros).
-- **Ángulo del dron** (`ROL`/`PIT`/`YAW`, grados) — roll, pitch, yaw.
-- **Posición horizontal** (`POSX`/`POSY`, metros).
-- **Peso** (`MASS`, kg) — masa total = cuerpo + los 4 motores, tratada
-  como una sola masa puntual para la física (no se modela la inercia de
-  cada motor por separado).
-- **Ancho de banda** — dos paneles tipo osciloscopio, `TX` (canal de subida:
-  Operator → UAV, comandos) y `RX` (canal de bajada: UAV → Operator,
-  telemetría). Cada panel muestra **un solo canal** (nada de multicanal):
-  se ve el ancho de banda en bytes/seg y, dibujada como una onda cuadrada
-  real (NRZ), la señal que el `CommGatewayOutput` efectivamente codificó y
-  transmitió bit a bit — no es una animación decorativa, son los bits
-  reales de cada mensaje.
-- Barras de throttle por motor (abajo), como ya había antes.
+- **Battery** (`BAT`, %) — drains faster the more total thrust the motors use.
+- **Altitude** (`ALT`, meters).
+- **Health** (`HP`, %) — decreases on hard landings (vertical impact
+  velocity > 3 m/s). At 0% the UAV is dead: motors stop, no commands are
+  processed, physics still applies (gravity). Damage also reduces effective
+  max thrust linearly down to 50% at 0 HP.
+- **Drone attitude** (`ROL`/`PIT`/`YAW`, degrees) — roll, pitch, yaw.
+- **Horizontal position** (`POSX`/`POSY`, meters).
+- **Mass** (`MASS`, kg) — total mass = body + 4 motors, treated as a single
+  point mass for physics (each motor's separate inertia is not modeled).
+- **Command log** — last 4 commands received by the UAV, shown below the
+  telemetry readout. Valid commands appear in green, corrupted ones in red.
+- **Bandwidth** — two oscilloscope-style panels: `TX` (uplink:
+  Operator → UAV, commands) and `RX` (downlink: UAV → Operator, telemetry).
+  Each panel shows a **single channel** (no multi-channel): bandwidth in
+  bytes/sec and, drawn as a real NRZ square wave, the actual signal the
+  `CommGatewayOutput` encoded and transmitted bit by bit — not a decorative
+  animation, these are the real bits of each message.
+- Per-motor throttle bars at the bottom, as before.
 
-Todo el texto del HUD (letras, números, `%`, `:`, etc.) se dibuja con una
-fuente vectorial propia (`rendering/vector_font.py`) hecha 100% de
-segmentos de línea — nada de texturas ni archivos de fuente.
+All HUD text (letters, numbers, `%`, `:`, etc.) is drawn with a custom
+vector font (`rendering/vector_font.py`) made 100% of line segments — no
+textures or font files.
 
-## Comunicación: GNU Radio real, no una cola en memoria
+## Communication: Real GNU Radio, not an in-memory queue
 
-El Operator y el UAV son, cada uno, emisor y receptor del otro (el Operator
-transmite comandos, el UAV transmite telemetría) y **la señal entre ambos
-viaja de verdad por GNU Radio**: modulación GMSK real, un canal simulado
-con ruido AWGN (`channels.channel_model`), demodulación real, y
-sincronización por access code (`digital.correlate_access_code_tag_bb`).
-No es una cola de Python haciéndose pasar por radio.
+The Operator and the UAV are each other's transmitter and receiver (the
+Operator transmits commands, the UAV transmits telemetry), and **the signal
+between them actually travels through GNU Radio**: real GMSK modulation, a
+simulated AWGN channel (`channels.channel_model`), real demodulation, and
+access-code synchronization (`digital.correlate_access_code_tag_bb`). This
+is not a Python queue pretending to be a radio.
 
-Cada dirección (`command_link`, `telemetry_link`) es un `GnuRadioChannel`
-independiente con su propio hilo de fondo:
+Each direction (`command_link`, `telemetry_link`) is an independent
+`GnuRadioChannel` with its own background thread:
 
 ```
-send(bytes) -> [preámbulo + access code + payload + CRC32 + padding de cola]
-             -> digital.gmsk_mod (modulación real)
-             -> channels.channel_model (ruido AWGN simulado)
-             -> digital.gmsk_demod (demodulación real)
-             -> digital.correlate_access_code_tag_bb (sincronización real)
-             -> verificación CRC32
-             -> bytes recuperados (o el paquete se pierde, como en una radio real)
+send(bytes) -> [preamble + access code + payload + CRC32 + tail padding]
+             -> digital.gmsk_mod (real modulation)
+             -> channels.channel_model (simulated AWGN noise)
+             -> digital.gmsk_demod (real demodulation)
+             -> digital.correlate_access_code_tag_bb (real sync)
+             -> CRC32 verification
+             -> recovered bytes (or the packet is lost, just like a real radio)
 ```
 
-Consecuencias reales de esto, no cosméticas:
+Real consequences, not cosmetic:
 
-- **Los paquetes se pueden perder o corromper**: con ruido bajo (default
-  `noise_voltage=0.05`) casi todo llega bien, pero es una radio real, no una
-  garantía. Si el access code no sincroniza o el CRC32 falla, el paquete se
-  descarta — nunca se le entrega basura a la app (`UAV`/`Operator` ignoran
-  silenciosamente los paquetes corruptos, no crashean).
-- **La entrega es asíncrona y con jitter real**: cada ráfaga (armar +
-  modular + pasar por el canal + demodular) cuesta ~10ms de CPU real, así
-  que corre en un hilo de fondo por canal, no bloquea el loop principal. Por
-  eso el `UAVOperator` ya no manda un comando por frame: retransmite cada
-  combinación (motor, dirección) a un máximo de 20 Hz (`COMMAND_SEND_INTERVAL`),
-  como lo haría un transmisor RC real, y muy por debajo del techo medido de
-  ~100 ráfagas/seg por hilo.
-- **El throttle ya no depende de `dt`**: como los comandos llegan async y
-  con jitter (no un tick perfecto por frame como antes), cada `Motor` ahora
-  sube/baja un paso fijo (`throttle_step_up`/`throttle_step_down`) por
-  comando recibido, en vez de una tasa multiplicada por `dt`.
-- **Aparece un poco de arrastre aerodinámico** (`RigidBody.linear_drag_coefficient`
-  / `angular_drag_coefficient`): con la entrega perfectamente sincronizada de
-  antes, los 4 motores siempre subían exactamente igual y nunca había par de
-  giro por asimetría. Con radio real, el jitter entre motores es real (uno
-  puede llegar unos milisegundos antes que otro), y sin ningún arrastre eso
-  se acumulaba en un giro sin límite. El arrastre es física pasiva (resiste
-  cualquier velocidad/giro existente, nunca empuja hacia una actitud
-  objetivo) — no es una autoestabilización ni un piloto automático.
+- **Packets can be lost or corrupted**: with low noise (default
+  `noise_voltage=0.05`) almost everything arrives intact, but it's a real
+  radio, not a guarantee. If the access code doesn't sync or CRC32 fails,
+  the packet is dropped — corrupted data is never delivered to the app
+  (`UAV`/`Operator` silently ignore corrupt packets, they don't crash).
+- **Delivery is asynchronous with real jitter**: each burst (encode +
+  modulate + pass through the channel + demodulate) costs ~10ms of real CPU
+  time, so it runs in a background thread per channel, never blocking the
+  main loop. That's why the `UAVOperator` doesn't send one command per frame:
+  it retransmits each (motor, direction) combination at a max of 20 Hz
+  (`COMMAND_SEND_INTERVAL`), just like a real RC transmitter, well below the
+  measured ~100 bursts/sec per thread ceiling.
+- **Throttle no longer depends on `dt`**: since commands arrive async and
+  with jitter (not a perfect once-per-frame tick as before), each `Motor`
+  now bumps up/down by a fixed step (`throttle_step_up`/`throttle_step_down`)
+  per received command, rather than a rate multiplied by `dt`.
+- **A bit of aerodynamic drag appears** (`RigidBody.linear_drag_coefficient`
+  / `angular_drag_coefficient`): with perfectly synchronous delivery all 4
+  motors always rose at exactly the same rate and there was never any yaw
+  from asymmetry. With a real radio, jitter between motors is real (one may
+  arrive a few ms before another), and without any drag that accumulated
+  into unbounded spin. Drag is passive physics (it resists existing
+  velocity/spin, never pushes toward a target attitude) — it's not
+  auto-stabilization or a flight controller.
 
-## Arquitectura
+## Architecture
 
 ```
 uavsim/
 ├── comms/
-│   ├── command.py         Command + CommandOpcode: protocolo de 1 byte
-│   ├── telemetry.py       TelemetryPacket: struct binario (batería + masa)
-│   ├── gnuradio_link.py   GnuRadioChannel: el enlace de radio real (GMSK +
-│   │                      canal con ruido + demod + CRC), con su propio
-│   │                      hilo de fondo
-│   └── gateway.py          CommGatewayInput/Output: envuelven un
-│                            GnuRadioChannel: Output ve tráfico TX
-│                            (transmitido), Input ve tráfico RX (recibido
-│                            de verdad, con las pérdidas ya aplicadas)
+│   ├── command.py         Command + CommandOpcode: 1-byte protocol
+│   ├── telemetry.py       TelemetryPacket: binary struct (battery + mass + health + command log)
+│   ├── gnuradio_link.py   GnuRadioChannel: real radio link (GMSK +
+│   │                      noisy channel + demod + CRC), with its own
+│   │                      background thread
+│   └── gateway.py          CommGatewayInput/Output: wrap a
+│                            GnuRadioChannel: Output sees TX traffic
+│                            (transmitted), Input sees RX traffic (actually
+│                            received, with losses already applied)
 ├── physics/
-│   ├── motor.py          Motor: throttle -> empuje + torque de reacción
-│   │                      (step fijo por comando, ya no por dt)
-│   ├── battery.py        Battery: se descarga según el uso de los motores
-│   └── rigid_body.py     RigidBody: 6DOF genérico (numpy + scipy Rotation)
-│                          + arrastre aerodinámico lineal/angular
+│   ├── motor.py           Motor: throttle -> thrust + reaction torque
+│   │                      (fixed step per command, no longer per-dt)
+│   ├── battery.py         Battery: drains based on motor usage
+│   └── rigid_body.py      RigidBody: generic 6DOF (numpy + scipy Rotation)
+│                           + linear/angular aerodynamic drag
 ├── world/
-│   └── environment.py    World / FlatGroundPlane + apply_ground_contact()
-│                          (el UAV no atraviesa el piso; despega solo si
-│                          tiene empuje suficiente)
+│   └── environment.py     World / FlatGroundPlane + apply_ground_contact()
+│                          (UAV doesn't clip through the floor; takes off
+│                          only when thrust is sufficient)
 ├── entities/
-│   ├── uav.py             UAV: 4 motores en X, masa total, batería, aplica
-│   │                      comandos, corre física + contacto de suelo, emite
-│   │                      telemetría periódica
-│   └── operator.py        UAVOperator: teclas -> Command, con rate-limit
-│                          de 20Hz por (motor, dirección) hacia el
-│                          CommGatewayOutput
+│   ├── uav.py             UAV: 4 motors in X config, total mass, battery,
+│   │                      applies commands, runs physics + ground contact +
+│   │                      crash detection + health/damage, emits periodic
+│   │                      telemetry
+│   └── operator.py        UAVOperator: keys -> Command, rate-limited to
+│                          20 Hz per (motor, direction) to CommGatewayOutput
 ├── hud/
-│   └── hud.py              HUD: telemetría + ancho de banda + señal cruda,
-│                            todo leído desde el Operator
+│   └── hud.py             HUD: telemetry + bandwidth + raw signal + command
+│                          log, all read from the Operator
 └── rendering/
-    ├── window.py            Ventana + input unificado (motores, flechas,
-    │                        mouse, toggle de cámara) vía pygame
-    ├── camera.py             Camera: modo FOLLOW (orbit) y FREE (espectador)
-    ├── vector_font.py        Fuente vectorial (solo GL_LINES)
-    └── renderer.py           Dibuja terreno + UAV + HUD completo
+    ├── window.py           Window + unified input (motors, arrows,
+    │                       mouse, camera toggle, reset) via pygame
+    ├── camera.py           Camera: FOLLOW (orbit) and FREE (spectator) modes
+    ├── vector_font.py      Vector font (GL_LINES only)
+    └── renderer.py         Draws terrain + UAV + full HUD
 ```
 
-### Por qué el bug de la cámara pasaba
+### Why the camera bug happened (historical)
 
-Antes, el UAV no tenía colisión con el suelo: caía en caída libre desde el
-frame 1 (gravedad sin nada que la detenga), y la cámara estaba pegada con
-un offset fijo a la posición del UAV. En un par de segundos el dron caía
-tan lejos que salía del *far clipping plane* de la perspectiva → la
-pantalla se quedaba en el color de fondo (casi negro). Eso también hacía
-que el HUD pareciera "no existir": la escena se rompía casi al instante.
-Ahora `apply_ground_contact()` frena al UAV en el piso hasta que el propio
-empuje lo levanta, y la cámara nunca depende de la orientación del UAV (solo
-de su posición), así que aunque el dron dé vueltas por un empuje asimétrico,
-la cámara no "gira loca" con él.
+Before, the UAV had no ground collision: it fell in free fall from frame 1
+(gravity with nothing to stop it), and the camera was attached with a fixed
+offset to the UAV's position. In a couple of seconds the drone fell so far
+it exited the perspective far clipping plane → the screen turned to the
+background color (near black). That also made the HUD appear "absent": the
+scene broke almost instantly.
 
-### Otras decisiones
+Now `apply_ground_contact()` stops the UAV at the floor until its own thrust
+lifts it, and the camera never depends on the UAV's orientation (only its
+position), so even if the drone tumbles from asymmetric thrust, the camera
+doesn't "go crazy" with it.
 
-- **Protocolo en bits real**: `Command.encode()`/`decode()` empaquetan cada
-  orden en 1 byte real, y la UAV decodifica en su `CommGatewayInput`.
-- **Telemetría con `struct`**: pack/unpack binario con la librería estándar.
-- **Física con `numpy` + `scipy.spatial.transform.Rotation`**: cuaterniones
-  de scipy en vez de matrices de rotación hechas a mano.
-- **Separación estricta de capas**: `RigidBody` no sabe qué es un motor ni
-  qué es el suelo; `Motor` no sabe qué es un UAV; `UAV` no sabe qué es un
-  teclado ni una cámara; `HUD` nunca habla con el UAV, solo con lo que el
-  `Operator` ya recibió; `Camera` no sabe nada de física ni de comms.
+### Design decisions
 
-## Próximos pasos (no incluidos todavía)
+- **Real bit-level protocol**: `Command.encode()`/`decode()` pack each order
+  into a real 1-byte packet, and the UAV decodes it via `CommGatewayInput`.
+- **Telemetry with `struct`**: binary pack/unpack using the standard library.
+- **Physics with `numpy` + `scipy.spatial.transform.Rotation`**: scipy
+  quaternions instead of hand-rolled rotation matrices.
+- **Strict layer separation**: `RigidBody` doesn't know what a motor or
+  ground is; `Motor` doesn't know what a UAV is; `UAV` doesn't know about
+  keyboards or cameras; `HUD` never talks to the UAV, only to what the
+  `Operator` has already received; `Camera` knows nothing about physics or
+  comms.
 
-- Jammers: con el enlace ya siendo GNU Radio real, esto ahora es
-  literalmente subirle `noise_voltage` (o `frequency_offset`) a un
-  `GnuRadioChannel` según la distancia a un emisor de interferencia — la
-  infraestructura ya está.
-- Terreno no plano.
-- Contacto de suelo más realista (normal force real en vez de clamp).
+## Next steps (not yet implemented)
+
+- Jammers: with the link already being real GNU Radio, this is now literally
+  increasing `noise_voltage` (or `frequency_offset`) on a `GnuRadioChannel`
+  based on distance to an interference source — the infrastructure is already
+  there.
+- Non-flat terrain.
+- More realistic ground contact (real normal force instead of clamping).
