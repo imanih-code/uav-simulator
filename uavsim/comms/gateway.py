@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+import numpy as np
+
 from uavsim.comms.gnuradio_link import GnuRadioChannel
 
 
@@ -58,3 +60,6 @@ class CommGatewayInput:
 
     def recent_transmissions(self, window: Optional[float] = None) -> List[Tuple[float, bytes]]:
         return self._channel.rx_transmissions(window)
+
+    def recent_raw_transmissions(self, window: Optional[float] = None) -> List[Tuple[float, np.ndarray]]:
+        return self._channel.rx_raw_transmissions(window)

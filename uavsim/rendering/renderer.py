@@ -60,6 +60,7 @@ UAV_ARM_COLOR = (0.6, 0.6, 0.6)
 HUD_TEXT_COLOR = (0.75, 1.0, 0.8)
 HUD_LOG_OK_COLOR = (0.3, 1.0, 0.4)     # verde
 HUD_LOG_BAD_COLOR = (1.0, 0.3, 0.3)     # rojo
+HUD_RAW_SIGNAL_COLOR = (0.2, 0.5, 0.8)  # azul tenue, señal analógica cruda
 HUD_PANEL_BORDER_COLOR = (0.4, 0.6, 0.5)
 HUD_WAVEFORM_COLOR = (0.3, 1.0, 0.5)
 HUD_BAR_COLOR = (0.9, 0.9, 0.9)
@@ -348,18 +349,20 @@ class Renderer:
 
     # -- HUD: TX/RX oscilloscope-style signal panels ----------------------------
     def _draw_signal_panels(self, snapshot: HUDSnapshot) -> None:
-        panel_width, panel_height = 300.0, 65.0
+        panel_width, panel_height = 300.0, 85.0
         gap = 8.0
         x = self.hud_width - panel_width - 14.0
         tx_y = self.hud_height - panel_height - 14.0
         rx_y = tx_y - panel_height - gap
 
         self._draw_signal_panel(
-            "TX", snapshot.uplink_signal, snapshot.uplink_bandwidth_bps, snapshot.now,
+            "TX", snapshot.uplink_signal, snapshot.uplink_raw,
+            snapshot.uplink_bandwidth_bps, snapshot.now,
             x, tx_y, panel_width, panel_height,
         )
         self._draw_signal_panel(
-            "RX", snapshot.downlink_signal, snapshot.downlink_bandwidth_bps, snapshot.now,
+            "RX", snapshot.downlink_signal, snapshot.downlink_raw,
+            snapshot.downlink_bandwidth_bps, snapshot.now,
             x, rx_y, panel_width, panel_height,
         )
 
@@ -367,6 +370,7 @@ class Renderer:
         self,
         label: str,
         transmissions: Tuple[Tuple[float, bytes], ...],
+        raw_transmissions: Tuple[Tuple[float, np.ndarray], ...],
         bandwidth_bps: float,
         now: float,
         x: float,
@@ -390,15 +394,40 @@ class Renderer:
                    self._segment_drawer())
         glEnd()
 
+        window = SIGNAL_WINDOW_SECONDS
+        bit_dur = _SIGNAL_BIT_DURATION
+
+        # -- Raw analog waveform (upper portion) --
+        raw_low_y = y + height * 0.60
+        raw_high_y = y + height * 0.88
+        raw_mid_y = (raw_low_y + raw_high_y) / 2.0
+        raw_amp = (raw_high_y - raw_low_y) / 2.0
+        glColor3f(*HUD_RAW_SIGNAL_COLOR)
+        glBegin(GL_LINE_STRIP)
+        for ts, samples in raw_transmissions:
+            t0 = ts - (now - window)
+            n = len(samples)
+            for i in range(n):
+                t = t0 + (i / n) * 8.0 * bit_dur
+                if t < 0.0:
+                    continue
+                if t > window:
+                    break
+                px = x + (t / window) * width
+                py = raw_mid_y + samples[i] * raw_amp
+                glVertex2f(px, py)
+        glEnd()
+
+        # -- Demodulated digital bits (lower portion) --
         low_y = y + height * 0.18
         high_y = y + height * 0.55
         glColor3f(*HUD_WAVEFORM_COLOR)
         glBegin(GL_LINES)
-        for seg in _waveform_segments(transmissions, now, SIGNAL_WINDOW_SECONDS, label):
+        for seg in _waveform_segments(transmissions, now, window, label):
             t0, l0, t1, l1 = seg
-            px0 = x + (t0 / SIGNAL_WINDOW_SECONDS) * width
+            px0 = x + (t0 / window) * width
             py0 = high_y if l0 else low_y
-            px1 = x + (t1 / SIGNAL_WINDOW_SECONDS) * width
+            px1 = x + (t1 / window) * width
             py1 = high_y if l1 else low_y
             glVertex2f(px0, py0)
             glVertex2f(px1, py1)

@@ -36,6 +36,8 @@ class HUDSnapshot:
     downlink_bandwidth_bps: float = 0.0
     uplink_signal: Tuple[Tuple[float, bytes], ...] = field(default_factory=tuple)
     downlink_signal: Tuple[Tuple[float, bytes], ...] = field(default_factory=tuple)
+    uplink_raw: Tuple[Tuple[float, np.ndarray], ...] = field(default_factory=tuple)
+    downlink_raw: Tuple[Tuple[float, np.ndarray], ...] = field(default_factory=tuple)
     now: float = 0.0
 
     command_log: Tuple[Tuple[str, bool], ...] = ()  # (label, is_valid)
@@ -66,6 +68,12 @@ class HUD:
         downlink_signal = tuple(
             self._operator.telemetry_input.recent_transmissions(SIGNAL_WINDOW_SECONDS)
         )
+        uplink_raw = tuple(
+            self._uav_command_input.recent_raw_transmissions(SIGNAL_WINDOW_SECONDS)
+        )
+        downlink_raw = tuple(
+            self._operator.telemetry_input.recent_raw_transmissions(SIGNAL_WINDOW_SECONDS)
+        )
 
         command_log = []
         if packet is not None:
@@ -85,6 +93,8 @@ class HUD:
                 downlink_bandwidth_bps=downlink_bandwidth,
                 uplink_signal=uplink_signal,
                 downlink_signal=downlink_signal,
+                uplink_raw=uplink_raw,
+                downlink_raw=downlink_raw,
                 now=now,
                 command_log=tuple(command_log),
             )
@@ -103,6 +113,8 @@ class HUD:
             downlink_bandwidth_bps=downlink_bandwidth,
             uplink_signal=uplink_signal,
             downlink_signal=downlink_signal,
+            uplink_raw=uplink_raw,
+            downlink_raw=downlink_raw,
             now=now,
             command_log=tuple(command_log),
         )

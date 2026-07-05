@@ -54,10 +54,17 @@ def _run_burst(
     samples_per_symbol: int,
     noise_voltage: float,
     frequency_offset: float,
-) -> Optional[bytes]:
+) -> Tuple[Optional[bytes], np.ndarray]:
     """Modulate `payload`, push it through a simulated noisy channel, and
-    demodulate it back. Returns the recovered payload, or None if the
-    burst was lost (no sync found, truncated, or failed its CRC)."""
+    demodulate it back.
+
+    Returns (recovered_payload, raw_real_samples) where raw_real_samples is
+    the real part of the complex baseband signal after the channel (before
+    demodulation), normalized to [-1, 1].  Only the portion corresponding
+    to the first payload byte is returned (8 bits × samples_per_symbol
+    samples).  The raw signal is returned even when the packet is lost, so
+    the HUD can show what the noise looks like.
+    """
     crc = zlib.crc32(payload).to_bytes(_CRC_SIZE_BYTES, "big")
     frame = _PREAMBLE + _ACCESS_CODE_BYTES + payload + crc + _TAIL_PADDING
 
@@ -73,27 +80,43 @@ def _run_burst(
         _ACCESS_CODE_BITS, _ACCESS_CODE_THRESHOLD, "sync"
     )
     sink = blocks.vector_sink_b(1)
+    raw_sink = blocks.vector_sink_c(1)
 
     top_block = gr.top_block()
-    top_block.connect(source, modulator, channel, demodulator, correlator, sink)
+    top_block.connect(source, modulator, channel)
+    top_block.connect(channel, demodulator, correlator, sink)
+    top_block.connect(channel, raw_sink)
     top_block.run()
 
+    # Raw signal: real part of the first payload byte (after preamble + access code)
+    prefix_symbols = (len(_PREAMBLE) + len(_ACCESS_CODE_BYTES)) * 8
+    byte0_symbols = 8
+    start_sample = prefix_symbols * samples_per_symbol
+    end_sample = (prefix_symbols + byte0_symbols) * samples_per_symbol
+    raw_complex = np.array(raw_sink.data(), dtype=np.complex64)
+    clipped = raw_complex[start_sample:end_sample]
+    raw_real = np.real(clipped)
+    max_abs = np.max(np.abs(raw_real)) if len(raw_real) > 0 else 1.0
+    if max_abs > 0:
+        raw_real = raw_real / max_abs
+
+    # Demodulated bits
     bits = np.array(sink.data(), dtype=np.uint8)
     sync_offsets = [tag.offset for tag in sink.tags() if str(tag.key) == "sync"]
     if not sync_offsets:
-        return None  # no sync found -- packet lost to noise
+        return None, raw_real  # no sync — return raw signal anyway
 
     needed_bits = (len(payload) + _CRC_SIZE_BYTES) * 8
     recovered_bits = bits[sync_offsets[0]: sync_offsets[0] + needed_bits]
     if len(recovered_bits) < needed_bits:
-        return None  # truncated -- not enough signal survived to the sink
+        return None, raw_real  # truncated
 
     recovered = bytes(np.packbits(recovered_bits))
     recovered_payload, recovered_crc = recovered[: len(payload)], recovered[len(payload):]
     if zlib.crc32(recovered_payload).to_bytes(_CRC_SIZE_BYTES, "big") != recovered_crc:
-        return None  # corrupted -- CRC mismatch, drop it rather than deliver garbage
+        return None, raw_real  # CRC mismatch
 
-    return recovered_payload
+    return recovered_payload, raw_real
 
 
 class GnuRadioChannel:
@@ -121,6 +144,7 @@ class GnuRadioChannel:
 
         self._tx_log: Deque[Tuple[float, bytes]] = deque()
         self._rx_log: Deque[Tuple[float, bytes]] = deque()
+        self._rx_raw_log: Deque[Tuple[float, np.ndarray]] = deque()
 
         self._job_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=max_pending)
         self._rx_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=max_pending)
@@ -141,12 +165,14 @@ class GnuRadioChannel:
     def _worker_loop(self) -> None:
         while True:
             payload = self._job_queue.get()
-            recovered = _run_burst(
+            recovered, raw_samples = _run_burst(
                 payload, self.samples_per_symbol, self.noise_voltage, self.frequency_offset
             )
+            now = time.monotonic()
+            self._rx_raw_log.append((now, raw_samples))
+            self._prune(self._rx_raw_log, now)
             if recovered is None:
                 continue
-            now = time.monotonic()
             self._rx_log.append((now, recovered))
             self._prune(self._rx_log, now)
             try:
@@ -172,6 +198,9 @@ class GnuRadioChannel:
 
     def rx_bandwidth_bps(self, window: float = 1.0) -> float:
         return self._bandwidth(self._rx_log, window)
+
+    def rx_raw_transmissions(self, window: Optional[float] = None) -> List[Tuple[float, np.ndarray]]:
+        return self._recent(self._rx_raw_log, window)
 
     def _bandwidth(self, log: Deque[Tuple[float, bytes]], window: float) -> float:
         now = time.monotonic()
