@@ -404,6 +404,14 @@ class Renderer:
             glVertex2f(px1, py1)
         glEnd()
 
+        # Y-axis level labels
+        label_x = x + 2
+        glColor3f(*HUD_TEXT_COLOR)
+        glBegin(GL_LINES)
+        draw_text("1", label_x, high_y - char_h - 1, 5.0, 8.0, 1.5, self._segment_drawer())
+        draw_text("0", label_x, low_y - 1, 5.0, 8.0, 1.5, self._segment_drawer())
+        glEnd()
+
     # -- HUD: per-motor throttle bars --------------------------------------------
     def _draw_throttle_bars(self, throttle: Tuple[float, float, float, float]) -> None:
         bar_width, gap, max_height, margin = 20.0, 12.0, 110.0, 16.0
@@ -449,11 +457,14 @@ def _waveform_segments(
     representing a single segment.  All segments are independent so they
     can be drawn with GL_LINES — no LINE_STRIP diagonals between unrelated
     points.
+
+    Tracks the last signal level across calls via a function attribute so
+    the waveform doesn't jump to 0 at the left edge every frame.
     """
     window_start = now - window_seconds
     segments: List[Tuple[float, int, float, int]] = []
     prev_t = 0.0
-    prev_l = 0
+    prev_l = getattr(_waveform_segments, '_last_level', 0)
 
     for timestamp, payload in transmissions:
         if not payload:
@@ -484,4 +495,5 @@ def _waveform_segments(
     if prev_t < window_seconds:
         segments.append((prev_t, prev_l, window_seconds, prev_l))
 
+    _waveform_segments._last_level = prev_l
     return segments
