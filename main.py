@@ -39,9 +39,9 @@ def build_simulation(world: World) -> Tuple[UAV, UAVOperator, HUD]:
     links (each a `GnuRadioChannel`): one carrying commands
     (Operator -> UAV) and one carrying telemetry (UAV -> Operator). Both
     are genuinely GMSK-modulated, pushed through a simulated noisy
-    channel, and demodulated back -- not an in-memory shortcut. The HUD is
-    built on top of the Operator's telemetry buffer, never on the UAV
-    itself.
+    channel, and demodulated back -- not an in-memory shortcut. The TX
+    panel in the HUD reads from the UAV's command input (Rx side of the
+    command link) so it shows what actually survived the noisy channel.
     """
     command_link = GnuRadioChannel()
     telemetry_link = GnuRadioChannel()
@@ -56,7 +56,7 @@ def build_simulation(world: World) -> Tuple[UAV, UAVOperator, HUD]:
         command_output=CommGatewayOutput(command_link),
         telemetry_input=CommGatewayInput(telemetry_link),
     )
-    hud = HUD(operator)
+    hud = HUD(operator, uav.command_input)
     return uav, operator, hud
 
 

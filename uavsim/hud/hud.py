@@ -1,7 +1,10 @@
 """HUD: reads everything it shows either from telemetry the UAVOperator has
-buffered, or straight from the Operator's two gateways (bandwidth, raw
-signal history). It never talks to the UAV directly. Actual drawing lives
-in the rendering package; this class only decides "what to show".
+buffered, or straight from the gateways (bandwidth, raw signal history).
+The TX panel reads from the UAV's command input (Rx side of the command
+link) so it shows what actually survived the noisy channel. The RX panel
+reads from the Operator's telemetry input (Rx side of the telemetry link).
+Actual drawing lives in the rendering package; this class only decides
+"what to show".
 """
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from uavsim.comms.gateway import CommGatewayInput
 from uavsim.entities.operator import UAVOperator
 
 # How much signal history each oscilloscope-style HUD graph keeps on screen.
@@ -43,18 +47,21 @@ _OPCODE_LABELS = {
 
 
 class HUD:
-    def __init__(self, operator: UAVOperator) -> None:
+    def __init__(self, operator: UAVOperator, uav_command_input: CommGatewayInput) -> None:
         self._operator = operator
+        self._uav_command_input = uav_command_input
 
     def refresh(self) -> HUDSnapshot:
         """Pull the freshest telemetry plus live channel stats."""
         packet = self._operator.poll_telemetry()
         now = time.monotonic()
 
-        uplink_bandwidth = self._operator.command_output.bandwidth_bps()
+        # TX panel shows what the UAV actually received (after noise/demod/CRC),
+        # not what the Operator transmitted — so we read from the Rx side.
+        uplink_bandwidth = self._uav_command_input.bandwidth_bps()
         downlink_bandwidth = self._operator.telemetry_input.bandwidth_bps()
         uplink_signal = tuple(
-            self._operator.command_output.recent_transmissions(SIGNAL_WINDOW_SECONDS)
+            self._uav_command_input.recent_transmissions(SIGNAL_WINDOW_SECONDS)
         )
         downlink_signal = tuple(
             self._operator.telemetry_input.recent_transmissions(SIGNAL_WINDOW_SECONDS)

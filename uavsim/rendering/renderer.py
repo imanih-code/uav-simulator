@@ -348,8 +348,8 @@ class Renderer:
 
     # -- HUD: TX/RX oscilloscope-style signal panels ----------------------------
     def _draw_signal_panels(self, snapshot: HUDSnapshot) -> None:
-        panel_width, panel_height = 220.0, 46.0
-        gap = 10.0
+        panel_width, panel_height = 300.0, 65.0
+        gap = 8.0
         x = self.hud_width - panel_width - 14.0
         tx_y = self.hud_height - panel_height - 14.0
         rx_y = tx_y - panel_height - gap
@@ -390,16 +390,18 @@ class Renderer:
                    self._segment_drawer())
         glEnd()
 
-        points = _waveform_points(transmissions, now, SIGNAL_WINDOW_SECONDS)
         low_y = y + height * 0.18
         high_y = y + height * 0.55
         glColor3f(*HUD_WAVEFORM_COLOR)
-        glBegin(GL_LINE_STRIP)
-        for t_offset, level in points:
-            t_clamped = min(max(t_offset, 0.0), SIGNAL_WINDOW_SECONDS)
-            px = x + (t_clamped / SIGNAL_WINDOW_SECONDS) * width
-            py = high_y if level else low_y
-            glVertex2f(px, py)
+        glBegin(GL_LINES)
+        for seg in _waveform_segments(transmissions, now, SIGNAL_WINDOW_SECONDS):
+            t0, l0, t1, l1 = seg
+            px0 = x + (t0 / SIGNAL_WINDOW_SECONDS) * width
+            py0 = high_y if l0 else low_y
+            px1 = x + (t1 / SIGNAL_WINDOW_SECONDS) * width
+            py1 = high_y if l1 else low_y
+            glVertex2f(px0, py0)
+            glVertex2f(px1, py1)
         glEnd()
 
     # -- HUD: per-motor throttle bars --------------------------------------------
@@ -436,36 +438,50 @@ class Renderer:
         return _draw
 
 
-def _waveform_points(
+def _waveform_segments(
     transmissions: Tuple[Tuple[float, bytes], ...],
     now: float,
     window_seconds: float,
-) -> List[Tuple[float, int]]:
-    """Turn a burst of raw transmissions into an NRZ square-wave trace.
+) -> List[Tuple[float, int, float, int]]:
+    """Turn transmissions into NRZ square-wave segments.
 
-    Each transmitted message becomes a short burst of high/low pulses (the
-    first `_SIGNAL_BITS_SAMPLED` bits of its first byte), starting exactly
-    when it was sent. This is literally the bit pattern the CommGateway
-    encoded, not a decorative animation.
+    Each returned tuple is (t_start, level_start, t_end, level_end)
+    representing a single segment.  All segments are independent so they
+    can be drawn with GL_LINES — no LINE_STRIP diagonals between unrelated
+    points.
     """
     window_start = now - window_seconds
-    points: List[Tuple[float, int]] = [(0.0, 0)]
+    segments: List[Tuple[float, int, float, int]] = []
+    prev_t = 0.0
+    prev_l = 0
 
     for timestamp, payload in transmissions:
         if not payload:
             continue
         t0 = timestamp - window_start
+        if t0 < 0.0:
+            continue
+
+        # Gap from previous position → horizontal at current level
+        if t0 > prev_t:
+            segments.append((prev_t, prev_l, t0, prev_l))
+
         first_byte = payload[0]
         bits = [(first_byte >> i) & 1 for i in range(_SIGNAL_BITS_SAMPLED - 1, -1, -1)]
 
-        points.append((t0, 0))
         for i, bit in enumerate(bits):
-            seg_start = t0 + i * _SIGNAL_BIT_DURATION
-            seg_end = seg_start + _SIGNAL_BIT_DURATION
-            points.append((seg_start, bit))
-            points.append((seg_end, bit))
-        points.append((t0 + len(bits) * _SIGNAL_BIT_DURATION, 0))
+            t_start = t0 + i * _SIGNAL_BIT_DURATION
+            t_end = t_start + _SIGNAL_BIT_DURATION
+            if t_start > window_seconds:
+                break
+            if bit != prev_l:
+                segments.append((t_start, prev_l, t_start, bit))
+            segments.append((t_start, bit, min(t_end, window_seconds), bit))
+            prev_l = bit
+            prev_t = t_end
 
-    points.append((window_seconds, 0))
-    points.sort(key=lambda p: p[0])
-    return points
+    # Fill remaining time to the end of the window
+    if prev_t < window_seconds:
+        segments.append((prev_t, prev_l, window_seconds, prev_l))
+
+    return segments

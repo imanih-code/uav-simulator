@@ -259,6 +259,10 @@ class UAV:
         # Drain any pending command packets
         self._command_input.receive_all()
 
+    @property
+    def command_input(self) -> CommGatewayInput:
+        return self._command_input
+
     def motor_world_positions(self) -> List[np.ndarray]:
         """Motor mount points in world space -- used only by the renderer."""
         return [
