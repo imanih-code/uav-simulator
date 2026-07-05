@@ -43,8 +43,8 @@ class MotorId:
 
 @dataclass
 class UAVConfig:
-    body_mass: float = 1.0                  # kg, airframe + electronics
-    motor_mass: float = 0.05                # kg, each of the 4 motors
+    body_mass: float = 0.22                 # kg, airframe + electronics
+    motor_mass: float = 0.012               # kg, each of the 4 motors
     inertia_diag: np.ndarray = field(
         default_factory=lambda: np.array([0.02, 0.02, 0.04])
     )
@@ -134,17 +134,35 @@ class UAV:
             for motor in self.motors:
                 motor.throttle = 0.0
 
+        # -- hover controller ----------------------------------------------------
+    # Gain that opposes vertical velocity to produce a natural altitude hold.
+    # Higher values = stiffer hold; too high can oscillate.
+    _HOVER_GAIN = 0.4
+
     # -- physics -------------------------------------------------------------
     def _integrate_physics(self, dt: float) -> None:
         if not self._armed:
             for motor in self.motors:
                 motor.throttle = 0.0
 
-        forces_body = [motor.thrust_force_body() for motor in self.motors]
+        # Hover correction: damps upward velocity so the drone doesn't
+        # runaway when throttle is above hover level. Does NOT oppose
+        # downward motion — when throttle is cut the drone falls freely.
+        hover_correction = -max(self.body.velocity[2], 0.0) * self._HOVER_GAIN
+        effective_throttles = [
+            max(0.0, min(1.0, m.throttle + hover_correction))
+            for m in self.motors
+        ]
+
         points_body = [motor.position_body for motor in self.motors]
-        yaw_reaction_torque = np.array(
-            [0.0, 0.0, sum(motor.reaction_torque_z() for motor in self.motors)]
-        )
+        forces_body = [
+            np.array([0.0, 0.0, t * m.max_thrust])
+            for t, m in zip(effective_throttles, self.motors)
+        ]
+        yaw_reaction_torque = np.array([
+            0.0, 0.0,
+            sum(-m.spin_direction * 0.02 * t for t, m in zip(effective_throttles, self.motors)),
+        ])
         self.body.apply_body_forces(dt, forces_body, points_body, yaw_reaction_torque)
         self.is_grounded = apply_ground_contact(self.body, self.ground, dt)
         apply_world_bounds(self.body, WORLD_EXTENT_HALF)

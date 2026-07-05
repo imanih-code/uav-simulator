@@ -34,8 +34,8 @@ class Motor:
     position_body: np.ndarray   # fixed offset from the UAV center of mass
     max_thrust: float            # newtons, thrust delivered at throttle == 1.0
     spin_direction: int          # +1 clockwise, -1 counter-clockwise
-    throttle_step_up: float = 0.05     # throttle units gained per THROTTLE_UP command
-    throttle_step_down: float = 0.04   # throttle units lost per THROTTLE_DOWN command
+    throttle_step_up: float = 0.03     # throttle units gained per THROTTLE_UP command
+    throttle_step_down: float = 0.03   # throttle units lost per THROTTLE_DOWN command
     throttle: float = 0.0              # current throttle, clamped to [0, 1]
 
     def increase_throttle(self) -> None:

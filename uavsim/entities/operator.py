@@ -11,6 +11,9 @@ render frame: a real digital transmitter has its own update rate,
 independent of however fast the game is rendering, and GNU Radio's actual
 per-burst cost makes flooding the link at 60/sec both unrealistic and
 unnecessary.
+
+Holding a key longer progressively accelerates the send rate so the
+throttle steps feel fine with short taps but grow coarser when held.
 """
 from __future__ import annotations
 
@@ -28,13 +31,22 @@ from uavsim.comms.telemetry import TelemetryPacket
 #   2 / W -> back-right motor
 #   3 / E -> back-left motor
 #   4 / R -> front-left motor
+#   5 / T -> all four motors at once
 THROTTLE_UP_KEYS = {"1": 0, "2": 1, "3": 2, "4": 3, "5": -1}
 THROTTLE_DOWN_KEYS = {"q": 0, "w": 1, "e": 2, "r": 3, "t": -1}
 
-# How often the "transmitter" re-sends a throttle command while a key is
-# held. 20 Hz is a realistic digital-RC update rate and comfortably below
-# what a single GNU Radio worker thread can process per channel.
-COMMAND_SEND_INTERVAL = 0.05
+# Base interval between consecutive transmissions of the same command.
+# The actual interval shrinks as a key is held (see hold-duration
+# acceleration below), but 20 Hz is the floor.
+_COMMAND_SEND_INTERVAL = 0.05
+
+# Hold-duration thresholds and their corresponding send intervals.
+_HOLD_ACCELERATION: Tuple[Tuple[float, float], ...] = (
+    (0.0,    0.05),    # tap → 20 Hz, fine steps
+    (0.3,    0.025),   # ⅓ s → 40 Hz
+    (0.7,    0.012),   # ⅔ s → ~80 Hz
+    (1.5,    0.008),   # 1½ s → ~120 Hz
+)
 
 
 @dataclass
@@ -45,23 +57,47 @@ class UAVOperator:
     _last_sent_at: Dict[Tuple[CommandOpcode, int], float] = field(
         default_factory=dict, init=False
     )
+    _key_hold_start: Dict[str, float] = field(default_factory=dict, init=False)
+
+    @staticmethod
+    def _send_interval(hold_duration: float) -> float:
+        """Return the send interval for a key held for `hold_duration` seconds.
+
+        Short taps keep the base interval for fine adjustment; longer
+        holds progressively shorten it so the throttle moves faster.
+        """
+        for threshold, interval in reversed(_HOLD_ACCELERATION):
+            if hold_duration >= threshold:
+                return interval
+        return _COMMAND_SEND_INTERVAL
 
     def handle_pressed_keys(self, pressed_keys: Set[str]) -> None:
         """Translate currently-held keys into commands sent to the UAV.
 
         Called once per simulation tick with the set of keys currently
-        held down. Each (opcode, motor) pair is only re-transmitted once
-        every `COMMAND_SEND_INTERVAL` seconds, regardless of how often
-        this is called -- that's the "transmitter update rate".
+        held down. The send rate per (opcode, motor) pair accelerates as
+        the key is held, then resets when released.
         """
         now = time.monotonic()
+
+        # Start tracking newly pressed keys; remove released ones.
+        for key in pressed_keys:
+            if key not in self._key_hold_start:
+                self._key_hold_start[key] = now
+        for key in list(self._key_hold_start.keys()):
+            if key not in pressed_keys:
+                del self._key_hold_start[key]
+
         for key in pressed_keys:
             command = self._command_for_key(key)
             if command is None:
                 continue
             send_key = (command.opcode, command.motor_id)
+            hold_duration = now - self._key_hold_start.get(key, now)
+            interval = self._send_interval(hold_duration)
+
             last_sent = self._last_sent_at.get(send_key, 0.0)
-            if now - last_sent < COMMAND_SEND_INTERVAL:
+            if now - last_sent < interval:
                 continue
             self._last_sent_at[send_key] = now
             self.command_output.send(command.encode())

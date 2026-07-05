@@ -92,8 +92,8 @@ class Camera:
     # -- FOLLOW mode ---------------------------------------------------------
     def _update_follow(self, dt: float, arrow_keys: set, mouse_delta: Tuple[float, float]) -> None:
         dx, dy = mouse_delta
-        self.follow_azimuth += dx * self.mouse_sensitivity
-        self.follow_elevation -= dy * self.mouse_sensitivity
+        self.follow_azimuth -= dx * self.mouse_sensitivity
+        self.follow_elevation += dy * self.mouse_sensitivity
 
         if "left" in arrow_keys:
             self.follow_azimuth -= self.orbit_key_rate * dt
@@ -122,8 +122,8 @@ class Camera:
     # -- FREE mode -------------------------------------------------------------
     def _update_free(self, dt: float, arrow_keys: set, mouse_delta: Tuple[float, float]) -> None:
         dx, dy = mouse_delta
-        self.free_yaw += dx * self.mouse_sensitivity
-        self.free_pitch -= dy * self.mouse_sensitivity
+        self.free_yaw -= dx * self.mouse_sensitivity
+        self.free_pitch += dy * self.mouse_sensitivity
         self.free_pitch = _clamp(self.free_pitch, _MIN_ELEVATION, _MAX_ELEVATION)
 
         forward = _yaw_pitch_to_forward(self.free_yaw, self.free_pitch)
