@@ -406,14 +406,18 @@ class Renderer:
         glBegin(GL_LINE_STRIP)
         for ts, samples in raw_transmissions:
             t0 = ts - (now - window)
+            byte0_end_raw = t0 + 8.0 * bit_dur
+            if byte0_end_raw < 0.0:
+                continue
             n = len(samples)
             for i in range(n):
                 t = t0 + (i / n) * 8.0 * bit_dur
-                if t < 0.0:
+                if t < -bit_dur:
                     continue
-                if t > window:
+                if t > window + bit_dur:
                     break
-                px = x + (t / window) * width
+                t_clamped = max(0.0, min(t, window))
+                px = x + (t_clamped / window) * width
                 py = raw_mid_y + samples[i] * raw_amp
                 glVertex2f(px, py)
         glEnd()
@@ -502,12 +506,15 @@ def _waveform_segments(
         if not payload:
             continue
         t0 = timestamp - window_start
-        if t0 < 0.0:
-            continue
+        byte0_end = t0 + 8 * _SIGNAL_BIT_DURATION
+        if byte0_end < 0.0:
+            continue  # entire first byte is before the window
 
-        # Gap from previous position → horizontal at current level
-        if t0 > prev_t:
-            segments.append((prev_t, prev_l, t0, prev_l))
+        # Gap from previous position → horizontal at current level,
+        # clamped so we never draw before time 0.
+        gap_end = max(0.0, t0)
+        if gap_end > prev_t:
+            segments.append((prev_t, prev_l, gap_end, prev_l))
 
         first_byte = payload[0]
         bits = [(first_byte >> i) & 1 for i in range(_SIGNAL_BITS_SAMPLED - 1, -1, -1)]
@@ -517,11 +524,17 @@ def _waveform_segments(
             t_end = t_start + _SIGNAL_BIT_DURATION
             if t_start > window_seconds:
                 break
+            if t_end < 0.0:
+                continue  # this specific bit is before the window
+            t_start_clamped = max(0.0, t_start)
+            t_end_clamped = min(window_seconds, t_end)
+            if t_start_clamped > t_end_clamped:
+                continue
             if bit != prev_l:
-                segments.append((t_start, prev_l, t_start, bit))
-            segments.append((t_start, bit, min(t_end, window_seconds), bit))
+                segments.append((t_start_clamped, prev_l, t_start_clamped, bit))
+            segments.append((t_start_clamped, bit, t_end_clamped, bit))
             prev_l = bit
-            prev_t = t_end
+            prev_t = t_end_clamped
 
     # Fill remaining time to the end of the window
     if prev_t < window_seconds:
