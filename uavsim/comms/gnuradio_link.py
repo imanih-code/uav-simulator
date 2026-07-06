@@ -17,23 +17,32 @@ garbage. This is what makes the drone's control link and telemetry link
 "real" instead of a bare in-memory queue.
 
 Each channel (uplink commands, downlink telemetry) runs its own dedicated
-background thread. GNU Radio's own C++ blocks dominate the per-burst cost
+**subprocess**. GNU Radio's C++ blocks dominate the per-burst cost
 (building/tearing down a tiny flowgraph, not the DSP itself -- measured at
-roughly ~10ms/burst regardless of payload size), so a single worker thread
+roughly ~10ms/burst regardless of payload size), so a single worker
 per channel comfortably keeps up with this app's message rates without
 blocking the render loop.
+
+GNU Radio runs in isolated subprocesses via `multiprocessing` so its
+internal TPB (thread-per-block) scheduler cannot conflict with the main
+process's Pygame/OpenGL context (which would trigger GLXBadContextState).
 """
 from __future__ import annotations
 
+import multiprocessing as mp
+import multiprocessing.queues
+import os
+import pickle
 import queue
 import random
-import threading
 import time
 import zlib
 from collections import deque
 from typing import Deque, List, Optional, Tuple
 
 import numpy as np
+
+os.environ.pop("GR_SCHEDULER", None)  # only TPB exists in GR 3.10 — suppress spurious warning
 from gnuradio import blocks, channels, digital, gr
 
 # -- RF link constants, validated empirically against this exact GNU Radio
@@ -119,6 +128,29 @@ def _run_burst(
     return recovered_payload, raw_real
 
 
+def _worker_process(
+    job_queue: "mp.Queue",
+    result_queue: "mp.Queue",
+    samples_per_symbol: int,
+    noise_voltage: float,
+    frequency_offset: float,
+) -> None:
+    """Entrypoint for the GNU Radio subprocess.
+
+    Everything in here runs in an isolated process, so the TPB scheduler's
+    internal threads cannot interfere with the main process's GLX context.
+    """
+    random.seed()
+
+    while True:
+        payload = job_queue.get()
+        recovered, raw_samples = _run_burst(
+            payload, samples_per_symbol, noise_voltage, frequency_offset
+        )
+        serialised = pickle.dumps(raw_samples)
+        result_queue.put((recovered, serialised, time.monotonic()))
+
+
 class GnuRadioChannel:
     """One real, simulated RF link. Transmissions go in on `_transmit`;
     whatever survives the channel comes out through `_receive`.
@@ -137,19 +169,28 @@ class GnuRadioChannel:
         signal_history_seconds: float = 3.0,
         max_pending: int = 256,
     ) -> None:
-        self.noise_voltage = noise_voltage
-        self.samples_per_symbol = samples_per_symbol
-        self.frequency_offset = frequency_offset
         self._signal_history_seconds = signal_history_seconds
 
         self._tx_log: Deque[Tuple[float, bytes]] = deque()
         self._rx_log: Deque[Tuple[float, bytes]] = deque()
         self._rx_raw_log: Deque[Tuple[float, np.ndarray]] = deque()
 
-        self._job_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=max_pending)
         self._rx_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=max_pending)
 
-        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        ctx = mp.get_context("spawn")
+        self._job_queue: "mp.Queue" = ctx.Queue(maxsize=max_pending)
+        self._result_queue: "mp.Queue" = ctx.Queue(maxsize=max_pending)
+        self._worker = ctx.Process(
+            target=_worker_process,
+            args=(
+                self._job_queue,
+                self._result_queue,
+                samples_per_symbol,
+                noise_voltage,
+                frequency_offset,
+            ),
+            daemon=True,
+        )
         self._worker.start()
 
     # -- transmit side -------------------------------------------------------
@@ -159,29 +200,27 @@ class GnuRadioChannel:
         self._prune(self._tx_log, now)
         try:
             self._job_queue.put_nowait(payload)
-        except queue.Full:
+        except mp.queues.QueueFull:
             pass  # the link is saturated -- a real radio would drop it too
-
-    def _worker_loop(self) -> None:
-        while True:
-            payload = self._job_queue.get()
-            recovered, raw_samples = _run_burst(
-                payload, self.samples_per_symbol, self.noise_voltage, self.frequency_offset
-            )
-            now = time.monotonic()
-            self._rx_raw_log.append((now, raw_samples))
-            self._prune(self._rx_raw_log, now)
-            if recovered is None:
-                continue
-            self._rx_log.append((now, recovered))
-            self._prune(self._rx_log, now)
-            try:
-                self._rx_queue.put_nowait(recovered)
-            except queue.Full:
-                pass
 
     # -- receive side ---------------------------------------------------------
     def _receive(self) -> Optional[bytes]:
+        # Drain all available results from the subprocess
+        while True:
+            try:
+                recovered, serialised, now = self._result_queue.get_nowait()
+            except Exception:
+                break
+            raw_samples = pickle.loads(serialised)
+            self._rx_raw_log.append((now, raw_samples))
+            self._prune(self._rx_raw_log, now)
+            if recovered is not None:
+                self._rx_log.append((now, recovered))
+                self._prune(self._rx_log, now)
+                try:
+                    self._rx_queue.put_nowait(recovered)
+                except queue.Full:
+                    pass
         try:
             return self._rx_queue.get_nowait()
         except queue.Empty:
