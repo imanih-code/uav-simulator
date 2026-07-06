@@ -66,6 +66,7 @@ GLYPHS: Dict[str, List[Segment]] = {
     " ": [],
     "=": [_MID, ((0.0, 0.3), (1.0, 0.3))],
     "U": [_TOP_LEFT, _BOT_LEFT, _BOTTOM, _BOT_RIGHT, _TOP_RIGHT],
+    "V": [(_TL, _BM), (_TR, _BM)],
     "E": [_TOP, _TOP_LEFT, _MID, _BOT_LEFT, _BOTTOM],
     "D": [_TOP, _TOP_LEFT, _TOP_RIGHT, _BOT_RIGHT, _BOTTOM, _BOT_LEFT],
     "J": [_TOP_RIGHT, _BOT_RIGHT, _BOTTOM],
