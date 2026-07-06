@@ -12,19 +12,25 @@ from typing import List, Tuple
 
 import numpy as np
 from OpenGL.GL import (
+    GL_BLEND,
     GL_DEPTH_TEST,
     GL_LINE_LOOP,
     GL_LINE_STRIP,
     GL_LINES,
     GL_MODELVIEW,
     GL_MODELVIEW_MATRIX,
+    GL_ONE_MINUS_SRC_ALPHA,
     GL_POINTS,
     GL_PROJECTION,
     GL_PROJECTION_MATRIX,
     GL_SCISSOR_TEST,
+    GL_SRC_ALPHA,
+    GL_TRIANGLE_STRIP,
     GL_VIEWPORT,
     glBegin,
+    glBlendFunc,
     glColor3f,
+    glColor4f,
     glDisable,
     glEnable,
     glEnd,
@@ -756,6 +762,23 @@ class Renderer:
         cy = self.hud_height / 2.0
         text = "PAUSED"
         tw = self._font.text_width(text)
+        pad = 10
+        bx = cx - tw / 2.0 - pad
+        by = cy - self._font._size / 2.0 - pad
+        bw = tw + pad * 2
+        bh = self._font._size + pad * 2
+
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glColor4f(0.0, 0.0, 0.0, 0.6)
+        glBegin(GL_TRIANGLE_STRIP)
+        glVertex2f(bx, by)
+        glVertex2f(bx + bw, by)
+        glVertex2f(bx, by + bh)
+        glVertex2f(bx + bw, by + bh)
+        glEnd()
+        glDisable(GL_BLEND)
+
         self._font.draw(text, cx - tw / 2.0, cy - self._font._size / 2.0,
                         colour=(1.0, 1.0, 0.5))
 
