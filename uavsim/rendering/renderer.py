@@ -128,7 +128,7 @@ class Renderer:
         self._draw_command_log(snapshot)
         self._draw_signal_panels(snapshot)
         if snapshot.has_telemetry and snapshot.motor_throttle is not None:
-            self._draw_throttle_bars(snapshot.motor_throttle)
+            self._draw_throttle_bars(snapshot.motor_throttle, snapshot.now)
         self._draw_noise_timeline(uplink_noise, downlink_noise)
         self._draw_minimap(jammers)
         if paused:
@@ -559,21 +559,42 @@ class Renderer:
         self._font.draw("0", label_x, low_y - 1, colour=HUD_TEXT_COLOR)
 
     # -- HUD: per-motor throttle bars --------------------------------------------
-    def _draw_throttle_bars(self, throttle: Tuple[float, float, float, float]) -> None:
+    def _draw_throttle_bars(self, throttle: Tuple[float, float, float, float],
+                            now: float) -> None:
         bar_width, gap, max_height, margin = 20.0, 12.0, 110.0, 16.0
         base_y = margin + 14.0
 
         glBegin(GL_LINES)
         for i, value in enumerate(throttle):
             x = margin + i * (bar_width + gap)
+            top = base_y + max_height * value
             glColor3f(*UAV_MOTOR_COLORS[i])
             glVertex2f(x, base_y)
-            glVertex2f(x, base_y + max_height * value)
+            glVertex2f(x, top)
             glVertex2f(x + bar_width, base_y)
-            glVertex2f(x + bar_width, base_y + max_height * value)
+            glVertex2f(x + bar_width, top)
             glVertex2f(x, base_y)
             glVertex2f(x + bar_width, base_y)
         glEnd()
+
+        # Max-throttle indicator line + blinking MAX label
+        glBegin(GL_LINES)
+        for i, value in enumerate(throttle):
+            x = margin + i * (bar_width + gap)
+            # Horizontal line at full throttle
+            max_y = base_y + max_height
+            glColor3f(*UAV_MOTOR_COLORS[i])
+            glVertex2f(x + 2, max_y)
+            glVertex2f(x + bar_width - 2, max_y)
+        glEnd()
+
+        for i, value in enumerate(throttle):
+            if value >= 1.0 and int(now * 2) % 2 == 0:
+                x = margin + i * (bar_width + gap)
+                max_y = base_y + max_height
+                tw = self._font.text_width("MAX")
+                self._font.draw("MAX", x + (bar_width - tw) / 2.0, max_y + 3,
+                                colour=(1.0, 0.8, 0.0))
 
         for i in range(len(throttle)):
             x = margin + i * (bar_width + gap)
