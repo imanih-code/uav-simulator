@@ -97,9 +97,50 @@ THR+2       —         ← orange (sent, lost)
 - SENT: green if it matches RCVD, orange otherwise
 - RCVD: green if valid, red if BAD
 
+## ChaoticLayer — Lorenz Attractor (Secret Bridge)
+
+**File**: `uavsim/comms/comm_chaos_adapter.py` — class `ChaoticLayer`
+
+Both Operator and UAV share identical Lorenz parameters and initial
+conditions.  Integrating forward produces identical chaotic sequences,
+forming a "secret language" that only they share.
+
+```
+dx/dt = sigma * (y - x)
+dy/dt = x * (rho - z) - y
+dz/dt = x * y - beta * z
+```
+
+Default parameters (classic chaos): sigma=10, rho=28, beta=8/3, x₀=y₀=z₀=1
+
+The attractor state persists across calls so the trajectory is continuous.
+The `x` component is used as the chaotic carrier.
+
+```
+Operator                          UAV
+  │                                │
+  ├─ ChaoticLayer(x₀,y₀,z₀)       ├─ ChaoticLayer(x₀,y₀,z₀)
+  │   step() → {x,y,z}            │   step() → {x,y,z}  ← identical
+  │                                │
+  ├─ modulate(command, carrier)    ├─ demodulate(signal, carrier)
+  │   → raw_samples                │   → command
+  │                                │
+  └────── GnuRadioChannel ────────┘
+```
+
+### Planned (next steps)
+
+- **Modulate**: embed command bits into the chaotic carrier (e.g. x[n])
+- **Demodulate**: recover bits using the synchronised carrier from the
+  receiver's own attractor
+- **Initial conditions as key**: different (x₀,y₀,z₀) tuples produce
+  completely different trajectories → natural cryptographic separation
+- **Resynchronisation**: periodically send a known sync pattern so the
+  receiver can correct drift
+
 ## CommChaosAdapter (Signal Correlation)
 
-**File**: `uavsim/comms/comm_chaos_adapter.py`
+**File**: `uavsim/comms/comm_chaos_adapter.py` — class `CommChaosAdapter`
 
 Normalized cross-correlation against known patterns:
 
@@ -131,6 +172,8 @@ aa00daa feat: wire TTFFont into HUD renderer, replacing stroke font
 
 ## Pending
 
+- Implement `modulate()` / `demodulate()` in ChaoticLayer
+- Wire ChaoticLayer into command send/receive flow
 - Wire CommChaosAdapter into the receive flow (HUD)
 - Show match confidence in the signal panel
-- Adjust TTF text positions if misaligned
+- Periodic Lorenz resync between Operator and UAV
