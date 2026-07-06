@@ -67,7 +67,7 @@ class DSSSChaotic:
         chips_f = chips_f.ravel()                       # (n_bits * N,)
         return ((chips_f + 1.0) * 0.5).astype(np.uint8)
 
-    def despread(self, chips: np.ndarray) -> np.ndarray:
+    def despread(self, chips: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Recover bits from noisy chips via correlation.
 
         Parameters
@@ -78,8 +78,10 @@ class DSSSChaotic:
 
         Returns
         -------
-        np.ndarray
-            uint8 bits, shape ``(n_chips // N,)``.
+        Tuple[np.ndarray, np.ndarray]
+            (bits, raw_correlation)
+            bits : uint8 array, shape ``(n_chips // N,)``
+            raw_correlation : float64 array, per-bit correlation values
         """
         n_chips = len(chips)
         n_bits = n_chips // self.N
@@ -87,7 +89,7 @@ class DSSSChaotic:
         chips_f = 2.0 * chips[:n_bits * self.N].astype(np.float64) - 1.0
         blocks = chips_f.reshape(n_bits, self.N)       # (n_bits, N)
         corr = np.sum(blocks * seq, axis=1)             # (n_bits,)
-        return (corr > 0).astype(np.uint8)
+        return (corr > 0).astype(np.uint8), corr
 
 
 class ChaoticLayer:

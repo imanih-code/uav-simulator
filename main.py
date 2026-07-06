@@ -188,7 +188,9 @@ def main() -> None:
                 worker_error = f"TLM LINK: {telemetry_link._worker_crashed_info}"
 
             if paused:
-                snapshot = hud.refresh(worker_error=worker_error)
+                snapshot = hud.refresh(worker_error=worker_error,
+                                       uplink_correlation=command_link.last_correlation,
+                                       downlink_correlation=telemetry_link.last_correlation)
             else:
                 # Update noise before sending anything so the first post-reset
                 # command doesn't use stale high noise from a previous jammer.
@@ -197,7 +199,9 @@ def main() -> None:
                     uav.radio_enabled = True
                 operator.handle_pressed_keys(input_state.motor_keys)
                 uav.update(dt)
-                snapshot = hud.refresh(worker_error=worker_error)
+                snapshot = hud.refresh(worker_error=worker_error,
+                                       uplink_correlation=command_link.last_correlation,
+                                       downlink_correlation=telemetry_link.last_correlation)
 
             camera.update(dt, uav.body.position, input_state.arrow_keys, input_state.mouse_delta)
 

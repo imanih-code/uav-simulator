@@ -131,12 +131,18 @@ class Renderer:
         self._begin_hud_overlay()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
-        self._draw_dssc_indicator(dssc_N)
+        self._draw_dssc_indicator(dssc_N,
+                                   uplink_corr=snapshot.uplink_correlation,
+                                   downlink_corr=snapshot.downlink_correlation)
         self._draw_command_log(snapshot)
         self._draw_signal_panels(snapshot)
         if snapshot.has_telemetry and snapshot.motor_throttle is not None:
             self._draw_throttle_bars(snapshot.motor_throttle, snapshot.now)
         self._draw_noise_timeline(uplink_noise, downlink_noise)
+        if dssc_N > 0:
+            ds_x = self.hud_width - MINIMAP_SIZE - MINIMAP_MARGIN
+            ds_y = MINIMAP_MARGIN + MINIMAP_SIZE + 6
+            self._font.draw(f"DSSS:{dssc_N}", ds_x, ds_y, colour=(0.3, 0.8, 1.0))
         self._draw_minimap(jammers)
         if paused:
             self._draw_pause_overlay(len(jammers))
@@ -442,7 +448,8 @@ class Renderer:
             f"YAW:{yaw:.1f}",
         ]
 
-    def _draw_dssc_indicator(self, dssc_N: int) -> None:
+    def _draw_dssc_indicator(self, dssc_N: int, uplink_corr: float = 0.0,
+                             downlink_corr: float = 0.0) -> None:
         if dssc_N <= 0:
             return
         panel_width = 300.0
@@ -450,8 +457,69 @@ class Renderer:
         x = self.hud_width - panel_width - 14.0
         tx_y = self.hud_height - 85.0 - 14.0
         rx_y = tx_y - 85.0 - gap
-        y = rx_y - 55.0 - gap - self._font._size - 4
-        self._font.draw(f"DSSS:{dssc_N}", x + 4, y, colour=(0.3, 0.8, 1.0))
+        y = rx_y - 55.0 - gap - self._font._size - 4 - 14
+
+        bar_y = y
+        bar_h = 10
+        bar_w = panel_width - 8
+
+        glBegin(GL_LINES)
+        # border
+        glColor3f(*HUD_PANEL_BORDER_COLOR)
+        glVertex2f(x + 4, bar_y)
+        glVertex2f(x + 4 + bar_w, bar_y)
+        glVertex2f(x + 4, bar_y + bar_h)
+        glVertex2f(x + 4 + bar_w, bar_y + bar_h)
+        glVertex2f(x + 4, bar_y)
+        glVertex2f(x + 4, bar_y + bar_h)
+        glVertex2f(x + 4 + bar_w, bar_y)
+        glVertex2f(x + 4 + bar_w, bar_y + bar_h)
+
+        # uplink fill (left half)
+        ul_fill = int(bar_w * uplink_corr)
+        ul_color = (0.3 + 0.7 * (1.0 - uplink_corr),
+                    0.3 + 0.7 * uplink_corr,
+                    0.0)
+        glColor3f(*ul_color)
+        glVertex2f(x + 5, bar_y + 1)
+        glVertex2f(x + 5 + ul_fill, bar_y + 1)
+        glVertex2f(x + 5, bar_y + 1)
+        glVertex2f(x + 5, bar_y + bar_h - 1)
+        glVertex2f(x + 5 + ul_fill, bar_y + 1)
+        glVertex2f(x + 5 + ul_fill, bar_y + bar_h - 1)
+        glVertex2f(x + 5, bar_y + bar_h - 1)
+        glVertex2f(x + 5 + ul_fill, bar_y + bar_h - 1)
+
+        # downlink fill (right half)
+        dl_fill = int(bar_w * downlink_corr)
+        dl_color = (0.3 + 0.7 * (1.0 - downlink_corr),
+                    0.3 + 0.7 * downlink_corr,
+                    0.0)
+        bar_mid = x + 4 + bar_w // 2
+        glColor3f(*dl_color)
+        glVertex2f(bar_mid, bar_y + 1)
+        glVertex2f(bar_mid + dl_fill // 2, bar_y + 1)
+        glVertex2f(bar_mid, bar_y + 1)
+        glVertex2f(bar_mid, bar_y + bar_h - 1)
+        glVertex2f(bar_mid + dl_fill // 2, bar_y + 1)
+        glVertex2f(bar_mid + dl_fill // 2, bar_y + bar_h - 1)
+        glVertex2f(bar_mid, bar_y + bar_h - 1)
+        glVertex2f(bar_mid + dl_fill // 2, bar_y + bar_h - 1)
+
+        # divider line between uplink/downlink halves
+        glColor3f(*HUD_PANEL_BORDER_COLOR)
+        glVertex2f(bar_mid, bar_y)
+        glVertex2f(bar_mid, bar_y + bar_h)
+        glEnd()
+
+        # labels
+        label_y = bar_y - 18
+        self._font.draw(f"UL {uplink_corr:.2f}", x + 5, label_y,
+                        colour=HUD_TEXT_COLOR)
+        self._font.draw(f"DL {downlink_corr:.2f}",
+                        bar_mid + 2, label_y,
+                        colour=HUD_TEXT_COLOR)
+
 
     # -- HUD: command log (SENT vs RCVD) ----------------------------------------
     def _draw_command_log(self, snapshot: HUDSnapshot) -> None:

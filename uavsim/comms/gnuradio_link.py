@@ -66,10 +66,15 @@ def _run_burst(
     noise_voltage: float,
     frequency_offset: float,
     dssc_params: Optional[Tuple[int, ChaoticLayer, ChaoticLayer]] = None,
-) -> Tuple[Optional[bytes], np.ndarray]:
+) -> Tuple[Optional[bytes], np.ndarray, float]:
     """
-    Returns (recovered_payload, raw_real_samples).
-    Packets with CRC mismatch are dropped (None).
+    Returns (recovered_payload, raw_real_samples, correlation_quality).
+
+    *correlation_quality* is in [0, 1]:
+    - DSSS path: ``|corr|.mean() / N`` from the despreader (1.0 = perfect match)
+    - Non-DSSS path: 1.0 on success, 0.0 on failure
+
+    Packets with CRC mismatch are dropped (None payload).
 
     If *dssc_params* is ``(N, lorenz_tx, lorenz_rx)`` the payload bits
     are spread/despread using chaotic sequences from the two Lorenz
@@ -119,10 +124,9 @@ def _run_burst(
     prefix_bytes = (len(_PREAMBLE) + len(_ACCESS_CODE_BYTES))
     prefix_symbols = prefix_bytes * 8
     if dssc_params is not None:
-        # Show N chips worth of raw waveform (one bit)
         raw_span_symbols = N
     else:
-        raw_span_symbols = 8  # one byte
+        raw_span_symbols = 8
     start_sample = prefix_symbols * samples_per_symbol
     end_sample = (prefix_symbols + raw_span_symbols) * samples_per_symbol
     raw_complex = np.array(raw_sink.data(), dtype=np.complex64)
@@ -137,8 +141,8 @@ def _run_burst(
     sync_offsets = [tag.offset for tag in sink.tags() if str(tag.key) == "sync"]
     if not sync_offsets:
         if dssc_params is not None:
-            lorenz_rx.generate(n_chips)  # maintain sync even on loss
-        return None, raw_real
+            lorenz_rx.generate(n_chips)
+        return None, raw_real, 0.0
 
     start = sync_offsets[0]
 
@@ -147,10 +151,11 @@ def _run_burst(
         recovered_chips = bits[start: start + needed]
         if len(recovered_chips) < needed:
             lorenz_rx.generate(needed)
-            return None, raw_real
+            return None, raw_real, 0.0
 
         seq_rx = SpreadingSequence(lorenz_rx, N=N)
-        recovered_bits = DSSSChaotic(seq_rx).despread(recovered_chips)
+        recovered_bits, corr = DSSSChaotic(seq_rx).despread(recovered_chips)
+        corr_quality = float(np.abs(corr).mean()) / N
         recovered = np.packbits(recovered_bits).tobytes()
 
         recovered_payload = recovered[: len(payload)]
@@ -159,15 +164,19 @@ def _run_burst(
         needed_bits = n_data_bits
         recovered_bits = bits[start: start + needed_bits]
         if len(recovered_bits) < needed_bits:
-            return None, raw_real
+            return None, raw_real, 0.0
         recovered = bytes(np.packbits(recovered_bits))
         recovered_payload = recovered[: len(payload)]
         recovered_crc = recovered[len(payload): len(payload) + _CRC_SIZE_BYTES]
 
     if zlib.crc32(recovered_payload).to_bytes(_CRC_SIZE_BYTES, "big") != recovered_crc:
-        return None, raw_real
+        if dssc_params is not None:
+            return None, raw_real, corr_quality
+        return None, raw_real, 0.0
 
-    return recovered_payload, raw_real
+    if dssc_params is not None:
+        return recovered_payload, raw_real, corr_quality
+    return recovered_payload, raw_real, 1.0
 
 
 def _worker_process(
@@ -227,7 +236,7 @@ def _worker_process(
                 continue
         payload = msg if isinstance(msg, bytes) else msg[1]
         try:
-            recovered, raw_samples = _run_burst(
+            recovered, raw_samples, corr_quality = _run_burst(
                 payload, samples_per_symbol, noise_voltage, frequency_offset,
                 dssc_params=dssc_params,
             )
@@ -239,7 +248,7 @@ def _worker_process(
                 pass
             continue
         serialised = pickle.dumps(raw_samples)
-        result_queue.put((recovered, serialised, time.monotonic()))
+        result_queue.put((recovered, serialised, time.monotonic(), corr_quality))
 
 
 class GnuRadioChannel:
@@ -272,6 +281,7 @@ class GnuRadioChannel:
         self._rx_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=max_pending)
         self._worker_crashed: bool = False
         self._worker_crashed_info: str = ""
+        self._last_correlation: float = 0.0
 
         pending = max(max_pending, 1024)
         ctx = mp.get_context("spawn")
@@ -330,6 +340,16 @@ class GnuRadioChannel:
         except queue.Full:
             pass
 
+    @property
+    def last_correlation(self) -> float:
+        """Correlation quality of the most recently processed burst, in [0, 1].
+
+        - DSSS path: ``|corr|.mean() / N`` (1.0 = perfect chaotic sequence match)
+        - Non-DSSS path: 1.0 on success, 0.0 on failure (CRC mismatch / no sync)
+        - Defaults to 0.0 before any burst has completed.
+        """
+        return self._last_correlation
+
     # -- transmit side -------------------------------------------------------
     def _transmit(self, payload: bytes) -> None:
         now = time.monotonic()
@@ -359,7 +379,8 @@ class GnuRadioChannel:
             if isinstance(item, tuple) and item and isinstance(item[0], str):
                 self._handle_control_message(item)
                 continue
-            recovered, serialised, now = item
+            recovered, serialised, now, corr_quality = item
+            self._last_correlation = corr_quality
             raw_samples = pickle.loads(serialised)
             self._rx_raw_log.append((now, raw_samples))
             self._prune(self._rx_raw_log, now)

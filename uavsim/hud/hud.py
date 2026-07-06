@@ -40,6 +40,9 @@ class HUDSnapshot:
     downlink_raw: Tuple[Tuple[float, np.ndarray], ...] = field(default_factory=tuple)
     now: float = 0.0
 
+    uplink_correlation: float = 0.0
+    downlink_correlation: float = 0.0
+
     command_log: Tuple[Tuple[str, bool], ...] = ()  # (label, is_valid) — RCVD by UAV
     sent_log: Tuple[str, ...] = ()                  # SENT by operator
     worker_error: str = ""
@@ -83,7 +86,9 @@ class HUD:
         self._operator = operator
         self._uav_command_input = uav_command_input
 
-    def refresh(self, worker_error: str = "") -> HUDSnapshot:
+    def refresh(self, worker_error: str = "",
+                uplink_correlation: float = 0.0,
+                downlink_correlation: float = 0.0) -> HUDSnapshot:
         """Pull the freshest telemetry plus live channel stats."""
         packet = self._operator.poll_telemetry()
         now = time.monotonic()
@@ -135,6 +140,8 @@ class HUD:
                 command_log=tuple(command_log),
                 sent_log=sent_log,
                 worker_error=worker_error,
+                uplink_correlation=uplink_correlation,
+                downlink_correlation=downlink_correlation,
             )
 
         attitude_deg = tuple(np.degrees(packet.attitude_rpy).tolist())
@@ -157,4 +164,6 @@ class HUD:
             command_log=tuple(command_log),
             sent_log=sent_log,
             worker_error=worker_error,
+            uplink_correlation=uplink_correlation,
+            downlink_correlation=downlink_correlation,
         )

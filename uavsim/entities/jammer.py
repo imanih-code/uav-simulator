@@ -10,7 +10,7 @@ import numpy as np
 class Jammer:
     position: np.ndarray = field(default_factory=lambda: np.zeros(3))
     radius: float = 80.0
-    center_noise: float = 0.8
+    center_noise: float = 0.71
     edge_noise: float = 0.15
     cylinder_height: float = 0.5
     cylinder_radius: float = 0.12
