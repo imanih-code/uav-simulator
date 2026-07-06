@@ -111,6 +111,7 @@ class Renderer:
         self._motor_labels: List[Tuple[float, float, int]] = []
         self._noise_history: deque = deque(maxlen=300)
         self._font = TTFFont("assets/fonts/7-segment.ttf", size=14)
+        self._pause_font = TTFFont("assets/fonts/7-segment.ttf", size=28)
 
     def draw_scene(self, camera_eye: np.ndarray, camera_target: np.ndarray,
                    jammers: List[Jammer] = []) -> None:
@@ -761,12 +762,13 @@ class Renderer:
         cx = self.hud_width / 2.0
         cy = self.hud_height / 2.0
         text = "PAUSED"
-        tw = self._font.text_width(text)
-        pad = 10
+        f = self._pause_font
+        tw = f.text_width(text)
+        pad = 14
         bx = cx - tw / 2.0 - pad
-        by = cy - self._font._size / 2.0 - pad
+        by = cy - f._size / 2.0 - pad
         bw = tw + pad * 2
-        bh = self._font._size + pad * 2
+        bh = f._size + pad * 2
 
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -779,8 +781,7 @@ class Renderer:
         glEnd()
         glDisable(GL_BLEND)
 
-        self._font.draw(text, cx - tw / 2.0, cy - self._font._size / 2.0,
-                        colour=(1.0, 1.0, 0.5))
+        f.draw(text, cx - tw / 2.0, cy - f._size / 2.0, colour=(1.0, 1.0, 0.5))
 
 def _waveform_segments(
     transmissions: Tuple[Tuple[float, bytes], ...],
