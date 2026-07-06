@@ -264,8 +264,10 @@ class UAV:
 
     # -- battery ---------------------------------------------------------------
     def _update_battery(self, dt: float) -> None:
-        total_throttle = sum(motor.throttle for motor in self.motors)
+        total_throttle = sum(m.throttle for m in self.motors)
         self.battery.update(dt, total_throttle, max_total_throttle=len(self.motors))
+        if self.battery.charge_percent <= 0.0 and not self._dead:
+            self._dead = True
 
     # -- telemetry ------------------------------------------------------------
     def _send_telemetry_if_due(self, dt: float) -> None:

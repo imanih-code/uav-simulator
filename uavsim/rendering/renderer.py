@@ -127,10 +127,11 @@ class Renderer:
 
     def draw_hud(self, snapshot: HUDSnapshot, paused: bool = False,
                  jammers: List[Jammer] = [], uplink_noise: float = 0.0,
-                 downlink_noise: float = 0.0) -> None:
+                 downlink_noise: float = 0.0, dssc_N: int = 0) -> None:
         self._begin_hud_overlay()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
+        self._draw_dssc_indicator(dssc_N)
         self._draw_command_log(snapshot)
         self._draw_signal_panels(snapshot)
         if snapshot.has_telemetry and snapshot.motor_throttle is not None:
@@ -440,6 +441,17 @@ class Renderer:
             f"PIT:{pitch:.1f}",
             f"YAW:{yaw:.1f}",
         ]
+
+    def _draw_dssc_indicator(self, dssc_N: int) -> None:
+        if dssc_N <= 0:
+            return
+        panel_width = 300.0
+        gap = 8.0
+        x = self.hud_width - panel_width - 14.0
+        tx_y = self.hud_height - 85.0 - 14.0
+        rx_y = tx_y - 85.0 - gap
+        y = rx_y - 55.0 - gap - self._font._size - 4
+        self._font.draw(f"DSSS:{dssc_N}", x + 4, y, colour=(0.3, 0.8, 1.0))
 
     # -- HUD: command log (SENT vs RCVD) ----------------------------------------
     def _draw_command_log(self, snapshot: HUDSnapshot) -> None:

@@ -57,6 +57,7 @@ def build_simulation(world: World) -> Tuple[GnuRadioChannel, GnuRadioChannel, UA
     """
     command_link = GnuRadioChannel(noise_voltage=_BASE_NOISE)
     telemetry_link = GnuRadioChannel(noise_voltage=_BASE_NOISE)
+    # Activar DSSS caótico: añadir dssc_N=256 (o el valor deseado) a ambos canales
 
     uav = UAV(
         config=UAVConfig(),
@@ -173,6 +174,13 @@ def main() -> None:
                 reset_jammers(jammers, world.extent_half, uav.body.position,
                               world.ground.ground_z)
 
+            if input_state.toggle_dssc:
+                new_val = 0 if command_link.dssc_N > 0 else 8
+                command_link.clear()
+                telemetry_link.clear()
+                command_link.dssc_N = new_val
+                telemetry_link.dssc_N = new_val
+
             worker_error = ""
             if not command_link.worker_alive:
                 worker_error = f"CMD LINK: {command_link._worker_crashed_info}"
@@ -198,7 +206,8 @@ def main() -> None:
             renderer.draw_scene(eye, target, jammers)
             renderer.draw_hud(snapshot, paused, jammers,
                                command_link.noise_voltage,
-                               telemetry_link.noise_voltage)
+                               telemetry_link.noise_voltage,
+                               dssc_N=command_link.dssc_N)
             window.end_frame()
 
             frame_time = time.perf_counter() - now

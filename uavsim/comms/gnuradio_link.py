@@ -41,6 +41,8 @@ from typing import Deque, List, Optional, Tuple
 
 import numpy as np
 
+from uavsim.comms.comm_chaos_adapter import ChaoticLayer, DSSSChaotic, SpreadingSequence
+
 os.environ.pop("GR_SCHEDULER", None)  # only TPB exists in GR 3.10 — suppress spurious warning
 import traceback
 from gnuradio import blocks, channels, digital, gr
@@ -63,13 +65,34 @@ def _run_burst(
     samples_per_symbol: int,
     noise_voltage: float,
     frequency_offset: float,
+    dssc_params: Optional[Tuple[int, ChaoticLayer, ChaoticLayer]] = None,
 ) -> Tuple[Optional[bytes], np.ndarray]:
     """
     Returns (recovered_payload, raw_real_samples).
     Packets with CRC mismatch are dropped (None).
+
+    If *dssc_params* is ``(N, lorenz_tx, lorenz_rx)`` the payload bits
+    are spread/despread using chaotic sequences from the two Lorenz
+    instances (one per link endpoint).  The RX Lorenz is always advanced
+    by the expected number of chips even when sync fails, so both sides
+    stay synchronised across packet losses.
     """
     crc = zlib.crc32(payload).to_bytes(_CRC_SIZE_BYTES, "big")
-    frame = _PREAMBLE + _ACCESS_CODE_BYTES + payload + crc + _TAIL_PADDING
+
+    if dssc_params is not None:
+        N, lorenz_tx, lorenz_rx = dssc_params
+        data_bytes = np.frombuffer(payload + crc, dtype=np.uint8)
+        data_bits = np.unpackbits(data_bytes)
+        n_data_bits = len(data_bits)
+        n_chips = n_data_bits * N
+
+        seq_tx = SpreadingSequence(lorenz_tx, N=N)
+        chips = DSSSChaotic(seq_tx).spread(data_bits)
+        chips_packed = np.packbits(chips)
+        frame = _PREAMBLE + _ACCESS_CODE_BYTES + bytes(chips_packed.tolist()) + _TAIL_PADDING
+    else:
+        frame = _PREAMBLE + _ACCESS_CODE_BYTES + payload + crc + _TAIL_PADDING
+        n_data_bits = (len(payload) + _CRC_SIZE_BYTES) * 8
 
     # gmsk_mod(do_unpack=True) by default internally unpacks bytes to bits
     source = blocks.vector_source_b(list(frame), False)
@@ -92,13 +115,16 @@ def _run_burst(
     top_block.connect(channel, raw_sink)
     top_block.run()
 
-    # Raw signal: real part of the first payload byte (after preamble + access code)
+    # Raw signal: real samples after the access code
     prefix_bytes = (len(_PREAMBLE) + len(_ACCESS_CODE_BYTES))
-    byte0_bytes = 1
     prefix_symbols = prefix_bytes * 8
-    byte0_symbols = 8
+    if dssc_params is not None:
+        # Show N chips worth of raw waveform (one bit)
+        raw_span_symbols = N
+    else:
+        raw_span_symbols = 8  # one byte
     start_sample = prefix_symbols * samples_per_symbol
-    end_sample = (prefix_symbols + byte0_symbols) * samples_per_symbol
+    end_sample = (prefix_symbols + raw_span_symbols) * samples_per_symbol
     raw_complex = np.array(raw_sink.data(), dtype=np.complex64)
     clipped = raw_complex[start_sample:end_sample]
     raw_real = np.real(clipped)
@@ -110,19 +136,34 @@ def _run_burst(
     bits = np.array(sink.data(), dtype=np.uint8)
     sync_offsets = [tag.offset for tag in sink.tags() if str(tag.key) == "sync"]
     if not sync_offsets:
-        return None, raw_real  # no sync
+        if dssc_params is not None:
+            lorenz_rx.generate(n_chips)  # maintain sync even on loss
+        return None, raw_real
 
-    # In this GR 3.10 build, correlate_access_code_tag_bb tags the first bit
-    # AFTER the access code (END).  No skip needed — payload starts here.
-    needed_bits = (len(payload) + _CRC_SIZE_BYTES) * 8
     start = sync_offsets[0]
-    recovered_bits = bits[start: start + needed_bits]
-    if len(recovered_bits) < needed_bits:
-        return None, raw_real  # truncated
 
-    recovered = bytes(np.packbits(recovered_bits))
-    recovered_payload = recovered[: len(payload)]
-    recovered_crc = recovered[len(payload): len(payload) + _CRC_SIZE_BYTES]
+    if dssc_params is not None:
+        needed = n_chips
+        recovered_chips = bits[start: start + needed]
+        if len(recovered_chips) < needed:
+            lorenz_rx.generate(needed)
+            return None, raw_real
+
+        seq_rx = SpreadingSequence(lorenz_rx, N=N)
+        recovered_bits = DSSSChaotic(seq_rx).despread(recovered_chips)
+        recovered = np.packbits(recovered_bits).tobytes()
+
+        recovered_payload = recovered[: len(payload)]
+        recovered_crc = recovered[len(payload): len(payload) + _CRC_SIZE_BYTES]
+    else:
+        needed_bits = n_data_bits
+        recovered_bits = bits[start: start + needed_bits]
+        if len(recovered_bits) < needed_bits:
+            return None, raw_real
+        recovered = bytes(np.packbits(recovered_bits))
+        recovered_payload = recovered[: len(payload)]
+        recovered_crc = recovered[len(payload): len(payload) + _CRC_SIZE_BYTES]
+
     if zlib.crc32(recovered_payload).to_bytes(_CRC_SIZE_BYTES, "big") != recovered_crc:
         return None, raw_real
 
@@ -135,6 +176,7 @@ def _worker_process(
     samples_per_symbol: int,
     noise_voltage: float,
     frequency_offset: float,
+    dssc_N: int = 0,
 ) -> None:
     """Entrypoint for the GNU Radio subprocess.
 
@@ -147,6 +189,15 @@ def _worker_process(
     - ``("reset",)`` to discard any in-flight job and return to idle
     """
     random.seed()
+
+    if dssc_N > 0:
+        lorenz_tx = ChaoticLayer()
+        lorenz_rx = ChaoticLayer()
+        dssc_params: Optional[Tuple[int, ChaoticLayer, ChaoticLayer]] = (dssc_N, lorenz_tx, lorenz_rx)
+    else:
+        lorenz_tx = lorenz_rx = None
+        dssc_params = None
+
     try:
         result_queue.put(("worker_started",))
     except Exception:
@@ -160,11 +211,25 @@ def _worker_process(
                 noise_voltage = msg[1]
                 continue
             if tag == "reset":
+                if dssc_N > 0:
+                    lorenz_tx.reset()
+                    lorenz_rx.reset()
                 continue  # discard any in-flight job and wait for next msg
+            if tag == "dssc":
+                dssc_N = msg[1]
+                if dssc_N > 0:
+                    lorenz_tx = ChaoticLayer()
+                    lorenz_rx = ChaoticLayer()
+                    dssc_params = (dssc_N, lorenz_tx, lorenz_rx)
+                else:
+                    lorenz_tx = lorenz_rx = None
+                    dssc_params = None
+                continue
         payload = msg if isinstance(msg, bytes) else msg[1]
         try:
             recovered, raw_samples = _run_burst(
-                payload, samples_per_symbol, noise_voltage, frequency_offset
+                payload, samples_per_symbol, noise_voltage, frequency_offset,
+                dssc_params=dssc_params,
             )
         except Exception as e:
             tb = traceback.format_exc()
@@ -194,9 +259,11 @@ class GnuRadioChannel:
         frequency_offset: float = 0.0,
         signal_history_seconds: float = 3.0,
         max_pending: int = 256,
+        dssc_N: int = 0,
     ) -> None:
         self._signal_history_seconds = signal_history_seconds
         self._noise_voltage = noise_voltage
+        self._dssc_N = dssc_N
 
         self._tx_log: Deque[Tuple[float, bytes]] = deque()
         self._rx_log: Deque[Tuple[float, bytes]] = deque()
@@ -218,6 +285,7 @@ class GnuRadioChannel:
                 samples_per_symbol,
                 noise_voltage,
                 frequency_offset,
+                dssc_N,
             ),
             daemon=True,
         )
@@ -246,6 +314,19 @@ class GnuRadioChannel:
         self._noise_voltage = value
         try:
             self._job_queue.put_nowait(("noise", value))
+        except queue.Full:
+            pass
+
+    @property
+    def dssc_N(self) -> int:
+        """Chips per bit (0 = DSSS disabled)."""
+        return self._dssc_N
+
+    @dssc_N.setter
+    def dssc_N(self, value: int) -> None:
+        self._dssc_N = value
+        try:
+            self._job_queue.put_nowait(("dssc", value))
         except queue.Full:
             pass
 
