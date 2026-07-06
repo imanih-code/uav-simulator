@@ -177,9 +177,10 @@ class GnuRadioChannel:
 
         self._rx_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=max_pending)
 
+        pending = max(max_pending, 1024)
         ctx = mp.get_context("spawn")
-        self._job_queue: "mp.Queue" = ctx.Queue(maxsize=max_pending)
-        self._result_queue: "mp.Queue" = ctx.Queue(maxsize=max_pending)
+        self._job_queue: "mp.Queue" = ctx.Queue(maxsize=pending)
+        self._result_queue: "mp.Queue" = ctx.Queue(maxsize=pending)
         self._worker = ctx.Process(
             target=_worker_process,
             args=(
@@ -200,7 +201,7 @@ class GnuRadioChannel:
         self._prune(self._tx_log, now)
         try:
             self._job_queue.put_nowait(payload)
-        except mp.queues.QueueFull:
+        except queue.Full:
             pass  # the link is saturated -- a real radio would drop it too
 
     # -- receive side ---------------------------------------------------------
