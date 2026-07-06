@@ -40,7 +40,8 @@ class HUDSnapshot:
     downlink_raw: Tuple[Tuple[float, np.ndarray], ...] = field(default_factory=tuple)
     now: float = 0.0
 
-    command_log: Tuple[Tuple[str, bool], ...] = ()  # (label, is_valid)
+    command_log: Tuple[Tuple[str, bool], ...] = ()  # (label, is_valid) — RCVD by UAV
+    sent_log: Tuple[str, ...] = ()                  # SENT by operator
 
 _OPCODE_LABELS = {
     0: "THR+", 1: "THR-", 2: "ARM", 3: "DSRM", 4: "CUT",
@@ -90,6 +91,8 @@ class HUD:
                         label += str(motor_id + 1)
                     command_log.append((label, True))
 
+        sent_log = tuple(self._operator.sent_log)
+
         if packet is None:
             return HUDSnapshot(
                 has_telemetry=False,
@@ -101,6 +104,7 @@ class HUD:
                 downlink_raw=downlink_raw,
                 now=now,
                 command_log=tuple(command_log),
+                sent_log=sent_log,
             )
 
         attitude_deg = tuple(np.degrees(packet.attitude_rpy).tolist())
@@ -121,4 +125,5 @@ class HUD:
             downlink_raw=downlink_raw,
             now=now,
             command_log=tuple(command_log),
+            sent_log=sent_log,
         )

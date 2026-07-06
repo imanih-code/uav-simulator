@@ -18,6 +18,7 @@ throttle steps feel fine with short taps but grow coarser when held.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Set, Tuple
 
@@ -48,6 +49,11 @@ _HOLD_ACCELERATION: Tuple[Tuple[float, float], ...] = (
     (1.5,    0.008),   # 1½ s → ~120 Hz
 )
 
+_OPCODE_LABELS = {
+    0: "THR+", 1: "THR-", 2: "ARM", 3: "DSRM", 4: "CUT",
+    5: "THR+A", 6: "THR-A",
+}
+
 
 @dataclass
 class UAVOperator:
@@ -58,6 +64,9 @@ class UAVOperator:
         default_factory=dict, init=False
     )
     _key_hold_start: Dict[str, float] = field(default_factory=dict, init=False)
+    sent_log: deque = field(
+        default_factory=lambda: deque(maxlen=10), init=False
+    )
 
     @staticmethod
     def _send_interval(hold_duration: float) -> float:
@@ -101,6 +110,14 @@ class UAVOperator:
                 continue
             self._last_sent_at[send_key] = now
             self.command_output.send(command.encode())
+            self.sent_log.append(self._command_to_label(command))
+
+    @staticmethod
+    def _command_to_label(command: Command) -> str:
+        label = _OPCODE_LABELS.get(int(command.opcode), f"OP{int(command.opcode)}")
+        if command.motor_id < 4:
+            label += str(command.motor_id + 1)
+        return label
 
     @staticmethod
     def _command_for_key(key: str) -> Optional[Command]:

@@ -63,8 +63,9 @@ UAV_MOTOR_COLORS = [
 UAV_ARM_COLOR = (0.6, 0.6, 0.6)
 
 HUD_TEXT_COLOR = (0.75, 1.0, 0.8)
-HUD_LOG_OK_COLOR = (0.3, 1.0, 0.4)     # verde
-HUD_LOG_BAD_COLOR = (1.0, 0.3, 0.3)     # rojo
+HUD_LOG_OK_COLOR = (0.3, 1.0, 0.4)     # verde — recibido correctamente
+HUD_LOG_BAD_COLOR = (1.0, 0.3, 0.3)     # rojo — CRC corrupto
+HUD_LOG_SENT_COLOR = (1.0, 0.65, 0.0)   # naranja — enviado pero no recibido
 HUD_RAW_SIGNAL_COLOR = (0.2, 0.5, 0.8)  # azul tenue, señal analógica cruda
 HUD_PANEL_BORDER_COLOR = (0.4, 0.6, 0.5)
 HUD_WAVEFORM_COLOR = (0.3, 1.0, 0.5)
@@ -433,23 +434,48 @@ class Renderer:
             f"YAW:{yaw:.1f}",
         ]
 
-    # -- HUD: command log -------------------------------------------------------
+    # -- HUD: command log (SENT vs RCVD) ----------------------------------------
     def _draw_command_log(self, snapshot: HUDSnapshot) -> None:
-        if not snapshot.command_log:
+        if not snapshot.sent_log and not snapshot.command_log:
             return
         margin = 14
         char_w, char_h, spacing = 6.0, 9.0, 1.5
         line_h = char_h + 4
         telemetry_height = 9 * (10 + 6)
-        # Start below the telemetry readout so no overlap
-        y = self.hud_height - margin - 10 - telemetry_height - 12 - (len(snapshot.command_log)) * line_h
+        # Two columns: SENT left, RCVD right
+        sent_x = margin
+        rcvd_x = margin + 85
+
+        sent_items = list(reversed(snapshot.sent_log))
+        rcvd_items = list(reversed(snapshot.command_log))  # [(label, valid), ...]
+
+        n = max(len(sent_items), len(rcvd_items))
+        y = self.hud_height - margin - 10 - telemetry_height - 12 - n * line_h
+
+        # Column headers
+        glBegin(GL_LINES)
+        col_header_y = y - line_h + 2
+        glColor3f(0.5, 0.5, 0.5)
+        draw_text("SENT", sent_x, col_header_y, char_w, char_h, spacing, self._segment_drawer())
+        draw_text("RCVD", rcvd_x, col_header_y, char_w, char_h, spacing, self._segment_drawer())
+        glEnd()
 
         glBegin(GL_LINES)
-        for label, valid in snapshot.command_log:
+        for i in range(n):
             y += line_h
-            color = HUD_LOG_OK_COLOR if valid else HUD_LOG_BAD_COLOR
-            glColor3f(*color)
-            draw_text(label, margin, y, char_w, char_h, spacing, self._segment_drawer())
+            sent_label = sent_items[i] if i < len(sent_items) else ""
+            rcvd_label, rcvd_valid = rcvd_items[i] if i < len(rcvd_items) else ("", True)
+
+            if sent_label:
+                match = sent_label == rcvd_label and rcvd_valid
+                s_color = HUD_LOG_OK_COLOR if match else HUD_LOG_SENT_COLOR
+                glColor3f(*s_color)
+                draw_text(sent_label, sent_x, y, char_w, char_h, spacing, self._segment_drawer())
+
+            if rcvd_label:
+                r_color = HUD_LOG_OK_COLOR if rcvd_valid else HUD_LOG_BAD_COLOR
+                glColor3f(*r_color)
+                draw_text(rcvd_label, rcvd_x, y, char_w, char_h, spacing, self._segment_drawer())
         glEnd()
 
     # -- HUD: TX/RX oscilloscope-style signal panels ----------------------------
