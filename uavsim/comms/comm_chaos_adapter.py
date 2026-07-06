@@ -1,11 +1,11 @@
-"""Adaptador de caos de comunicación: detecta qué comando se intentó
-transmitir correlacionando la señal raw contra patrones conocidos,
-incluso cuando el CRC falla.
+"""Communication chaos adapter: detects which command was attempted by
+cross-correlating the raw signal against known patterns, even when the
+CRC fails.
 
-Uso:
+Usage:
     adapter = CommChaosAdapter()
-    adapter.learn("THR+1", raw_samples)   # registrar patrón
-    label, conf = adapter.match(samples)   # (None, 0.0) si no hay match
+    adapter.learn("THR+1", raw_samples)   # register pattern
+    label, conf = adapter.match(samples)   # (None, 0.0) if no match
 """
 from __future__ import annotations
 
@@ -15,22 +15,22 @@ import numpy as np
 
 
 class CommChaosAdapter:
-    """Correlacionador de señales raw contra patrones conocidos."""
+    """Cross-correlates raw signal chunks against known patterns."""
 
     def __init__(self) -> None:
         self._patterns: Dict[str, np.ndarray] = {}
 
     def learn(self, label: str, samples: np.ndarray) -> None:
-        """Almacena un patrón de señal para un comando."""
+        """Store a signal pattern for a command label."""
         norm = samples - np.mean(samples)
         norm = norm / (np.linalg.norm(norm) + 1e-10)
         self._patterns[label] = norm
 
     def match(self, samples: np.ndarray) -> Tuple[Optional[str], float]:
-        """Correlaciona `samples` contra todos los patrones.
+        """Cross-correlate `samples` against all known patterns.
 
-        Returns (label, confidence) de la mejor coincidencia, o
-        (None, 0.0) si no hay patrones o la confianza es muy baja.
+        Returns (label, confidence) of the best match, or
+        (None, 0.0) if no patterns exist or confidence is too low.
         """
         if not self._patterns:
             return None, 0.0
@@ -54,9 +54,9 @@ class CommChaosAdapter:
         return (best_label, best_conf) if best_conf > 0.3 else (None, 0.0)
 
     def forget(self, label: str) -> None:
-        """Elimina un patrón."""
+        """Remove a stored pattern."""
         self._patterns.pop(label, None)
 
     def clear(self) -> None:
-        """Borra todos los patrones."""
+        """Clear all stored patterns."""
         self._patterns.clear()

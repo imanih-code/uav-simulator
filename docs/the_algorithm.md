@@ -1,36 +1,36 @@
 # The Algorithm
 
-## Arquitectura General
+## General Architecture
 
 ```
-Operator ──(Comando)──> GnuRadioChannel ──(señal raw)──> UAV
-                              │                              │
-                              │                         (procesa comando)
-                              │                              │
-                              v                              v
-                        CommChaosAdapter               TelemetryPacket
-                         (correlación)                (incluye command_log)
-                              │                              │
-                              └────────── HUD ───────────────┘
-                                       │
-                                   SENT vs RCVD
+Operator ──(command)──> GnuRadioChannel ──(raw signal)──> UAV
+                              │                            │
+                              │                    (processes command)
+                              │                            │
+                              v                            v
+                        CommChaosAdapter            TelemetryPacket
+                         (correlation)           (includes command_log)
+                              │                            │
+                              └────────── HUD ─────────────┘
+                                           │
+                                      SENT vs RCVD
 ```
 
 ## Per-Motor Timeout Stabilizer
 
-**Archivo**: `uavsim/entities/uav.py` — `_integrate_physics()`
+**File**: `uavsim/entities/uav.py` — `_integrate_physics()`
 
-Cada motor tiene un `_last_motor_cmd_time[i]`. Si han pasado `_MOTOR_TIMEOUT = 0.15s` desde el último comando a ese motor, se considera "timeout" y recibe corrección P+D. Si no, recibe el throttle raw directo.
+Each motor tracks `_last_motor_cmd_time[i]`. If `_MOTOR_TIMEOUT = 0.15s` has elapsed since the last command to that motor, it is considered "timed out" and receives P+D correction. Otherwise, it gets raw throttle directly.
 
 ```
-para cada motor i:
-  si now - _last_motor_cmd_time[i] >= 0.15s:
+for each motor i:
+  if now - _last_motor_cmd_time[i] >= 0.15s:
     throttle[i] = clip(min_raw + corrections[i], 0, 1)
-  sino:
+  else:
     throttle[i] = _raw_throttle[i]
 ```
 
-**Corrección P+D** (solo en motores timeout):
+**P+D Correction** (timed-out motors only):
 ```
 roll_corr  = clamp(rpy[0] * 0.15 + w[0] * 0.05, -0.10, +0.10)
 pitch_corr = clamp(rpy[1] * 0.15 + w[1] * 0.05, -0.10, +0.10)
@@ -41,32 +41,32 @@ M2 = -roll_corr - pitch_corr    (BL)
 M3 = -roll_corr + pitch_corr    (FL)
 ```
 
-**Hover controller**: `-max(vel_z, 0) * 0.4` — solo frena ascenso, no acelera caída.
+**Hover controller**: `-max(vel_z, 0) * 0.4` — only brakes ascent, does not accelerate descent.
 
-## GNU Radio en Subproceso Aislado
+## GNU Radio in Isolated Subprocess
 
-**Archivo**: `uavsim/comms/gnuradio_link.py`
+**File**: `uavsim/comms/gnuradio_link.py`
 
-GNU Radio 3.10 solo usa TPB (thread-per-block). Sus threads internos chocan con el contexto OpenGL de Pygame (GLXBadContextState). Solución: `multiprocessing.Process` con contexto `spawn`.
+GNU Radio 3.10 only uses TPB (thread-per-block). Its internal threads conflict with Pygame's OpenGL context (GLXBadContextState). Solution: `multiprocessing.Process` with `spawn` context.
 
 ```
-Proceso principal:          Subproceso GNU Radio:
-  Pygame + OpenGL            import gnuradio
-  HUD                        _run_burst() → top_block.run()
-  lógica del UAV             threads TPB aislados
+Main process:              GNU Radio subprocess:
+  Pygame + OpenGL           import gnuradio
+  HUD                       _run_burst() → top_block.run()
+  UAV logic                 TPB threads isolated
 ```
 
-- `_run_burst()` corre en el subproceso → **sin conflicto GLX**
-- `_job_queue` y `_result_queue` son `multiprocessing.Queue`
-- Los raw_samples viajan serializados con `pickle`
+- `_run_burst()` runs in the subprocess → **no GLX conflict**
+- `_job_queue` and `_result_queue` are `multiprocessing.Queue`
+- Raw samples travel serialized via `pickle`
 
-## Sensores y Telemetría
+## Sensors & Telemetry
 
-**Archivo**: `uavsim/comms/telemetry.py`
+**File**: `uavsim/comms/telemetry.py`
 
-El UAV envía paquetes cada 0.1s con struct binario:
+The UAV sends packets every 0.1s as a binary struct:
 
-| Campo | Tipo |
+| Field | Type |
 |---|---|
 | timestamp | double |
 | position (xyz) | 3× double |
@@ -79,46 +79,46 @@ El UAV envía paquetes cada 0.1s con struct binario:
 | health_percent | double |
 | command_log | 10× int |
 
-El `command_log` codifica (opcode, motor_id, valid) en un int32.
+`command_log` encodes (opcode, motor_id, valid) into one int32.
 
 ## SENT vs RCVD Command Log
 
-**Archivos**: `operator.py`, `hud.py`, `renderer.py`
+**Files**: `operator.py`, `hud.py`, `renderer.py`
 
-El operador guarda cada comando enviado en `sent_log` (deque maxlen=10). El UAV incluye su `_command_log` en cada paquete de telemetría.
+The operator stores every sent command in `sent_log` (deque maxlen=10). The UAV includes its `_command_log` in every telemetry packet.
 
 ```
 SENT        RCVD
-THR+1       THR+1     ← verde (coinciden)
-THR+2       —         ← naranja (enviado, perdido)
-—           BAD       ← rojo (CRC corrupto)
+THR+1       THR+1     ← green (match)
+THR+2       —         ← orange (sent, lost)
+—           BAD       ← red (CRC corrupt)
 ```
 
-- SENT: verde si coincide con RCVD, naranja si no
-- RCVD: verde si válido, rojo si BAD
+- SENT: green if it matches RCVD, orange otherwise
+- RCVD: green if valid, red if BAD
 
-## CommChaosAdapter (Correlación de Señales)
+## CommChaosAdapter (Signal Correlation)
 
-**Archivo**: `uavsim/comms/comm_chaos_adapter.py`
+**File**: `uavsim/comms/comm_chaos_adapter.py`
 
-Correlación cruzada normalizada contra patrones conocidos:
+Normalized cross-correlation against known patterns:
 
-1. `learn(label, samples)` — guarda patrón normalizado
-2. `match(samples)` — correlaciona, devuelve `(label, confidence)`
-3. Umbral de confianza: 0.3
+1. `learn(label, samples)` — stores normalized pattern
+2. `match(samples)` — correlates, returns `(label, confidence)`
+3. Confidence threshold: 0.3
 
-No usa FFT porque las ráfagas son muy cortas (~32 muestras) y el ruido es AWGN, donde la correlación cruzada ya es óptima.
+Does not use FFT because bursts are too short (~32 samples) and noise is AWGN, where cross-correlation is already optimal.
 
-## Fuente TTF con Texturas OpenGL
+## TTF Font with OpenGL Textures
 
-**Archivos**: `uavsim/rendering/ttf_font.py`, `assets/fonts/7-segment.ttf`
+**Files**: `uavsim/rendering/ttf_font.py`, `assets/fonts/7-segment.ttf`
 
-- Cada glyph se renderiza a surface (Pygame), se sube como textura `GL_RGBA`
-- Se dibuja con quads texturizados (alpha para transparencia)
-- Color se aplica multiplicando: textura blanca × `glColor3f`
-- Tamaño 14 para HUD general, 28 para overlay de pausa
+- Each glyph is rendered to a Pygame surface, uploaded as `GL_RGBA` texture
+- Drawn with textured quads (alpha for transparency)
+- Color applied multiplicatively: white texture × `glColor3f`
+- Size 14 for general HUD, 28 for pause overlay
 
-## Estado Actual (commits sin push)
+## Current State (unpushed commits)
 
 ```
 1ad58d2 feat: add CommChaosAdapter for raw signal pattern matching
@@ -129,8 +129,8 @@ a4238fc fix: add semi-transparent background behind PAUSED overlay for readabili
 aa00daa feat: wire TTFFont into HUD renderer, replacing stroke font
 ```
 
-## Pendientes
+## Pending
 
-- Conectar CommChaosAdapter al flujo de recepción (HUD)
-- Mostrar confianza del match en el panel de señales
-- Ajustar posiciones de texto TTF si quedan desalineadas
+- Wire CommChaosAdapter into the receive flow (HUD)
+- Show match confidence in the signal panel
+- Adjust TTF text positions if misaligned

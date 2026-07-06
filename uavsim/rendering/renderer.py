@@ -1,8 +1,7 @@
 """Draws the flat world, the UAV, and the HUD (numeric read-outs + two
 oscilloscope-style signal panels). Only `GL_POINTS` and `GL_LINES` are
-used -- no textures, no meshes -- matching the "solo puntos y vertices"
-requirement. Text is drawn with the hand-rolled stroke font in
-`vector_font.py`, which is itself nothing but line segments.
+used -- no textures, no meshes. Text is rendered via TTF texture atlas
+(`ttf_font.py`).
 """
 from __future__ import annotations
 
@@ -61,26 +60,26 @@ UAV_CENTER_COLOR = (1.0, 0.0, 0.0)
 UAV_BILLBOARD_CIRCLE_COLOR = (1.0, 1.0, 1.0)  # white, camera-facing circle
 UAV_CHASSIS_CIRCLE_COLOR = (1.0, 1.0, 1.0)    # white, chassis-tilted circle
 UAV_MOTOR_COLORS = [
-    (1.0, 1.0, 0.0),   # 0 FR → amarillo
+    (1.0, 1.0, 0.0),   # 0 FR → yellow
     (0.0, 1.0, 1.0),   # 1 BR → cyan
     (1.0, 0.0, 1.0),   # 2 BL → magenta
-    (0.5, 1.0, 0.0),   # 3 FL → verde lima
+    (0.5, 1.0, 0.0),   # 3 FL → lime green
 ]
 UAV_ARM_COLOR = (0.6, 0.6, 0.6)
 
 HUD_TEXT_COLOR = (0.75, 1.0, 0.8)
-HUD_LOG_OK_COLOR = (0.3, 1.0, 0.4)     # verde — recibido correctamente
-HUD_LOG_BAD_COLOR = (1.0, 0.3, 0.3)     # rojo — CRC corrupto
-HUD_LOG_SENT_COLOR = (1.0, 0.65, 0.0)   # naranja — enviado pero no recibido
-HUD_RAW_SIGNAL_COLOR = (0.2, 0.5, 0.8)  # azul tenue, señal analógica cruda
+HUD_LOG_OK_COLOR = (0.3, 1.0, 0.4)     # green — received correctly
+HUD_LOG_BAD_COLOR = (1.0, 0.3, 0.3)     # red — CRC corrupt
+HUD_LOG_SENT_COLOR = (1.0, 0.65, 0.0)   # orange — sent but not received
+HUD_RAW_SIGNAL_COLOR = (0.2, 0.5, 0.8)  # dim blue, raw analog signal
 HUD_PANEL_BORDER_COLOR = (0.4, 0.6, 0.5)
 HUD_WAVEFORM_COLOR = (0.3, 1.0, 0.5)
 HUD_BAR_COLOR = (0.9, 0.9, 0.9)
 
-JAMMER_BODY_COLOR = (1.0, 0.3, 0.1)     # naranja-rojizo
-JAMMER_CIRCLE_COLOR = (1.0, 0.1, 0.1)   # rojo para círculos de radio
-JAMMER_BLINK_COLOR_ON = (1.0, 0.0, 0.0)  # rojo encendido
-JAMMER_BLINK_COLOR_OFF = (0.2, 0.0, 0.0) # rojo apagado (tenue)
+JAMMER_BODY_COLOR = (1.0, 0.3, 0.1)     # orange-red
+JAMMER_CIRCLE_COLOR = (1.0, 0.1, 0.1)   # red for radius circles
+JAMMER_BLINK_COLOR_ON = (1.0, 0.0, 0.0)  # red on
+JAMMER_BLINK_COLOR_OFF = (0.2, 0.0, 0.0) # red dim
 
 MINIMAP_SIZE = 180
 MINIMAP_MARGIN = 14
