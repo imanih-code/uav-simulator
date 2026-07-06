@@ -113,6 +113,15 @@ class UAV:
         self._was_airborne = False
         self._health = 100.0
         self._dead = False
+        self._crc_enabled = False
+
+    @property
+    def crc_enabled(self) -> bool:
+        return self._crc_enabled
+
+    @crc_enabled.setter
+    def crc_enabled(self, value: bool) -> None:
+        self._crc_enabled = value
 
     # -- command handling --------------------------------------------------
     def _process_incoming_commands(self) -> None:
@@ -276,6 +285,7 @@ class UAV:
             mass=self.config.total_mass,
             command_log=tuple(self._command_log),
             health_percent=self._health,
+            crc_enabled=self._crc_enabled,
         )
         self._telemetry_output.send(packet.encode())
 
@@ -300,6 +310,7 @@ class UAV:
         self._raw_throttle = [0.0, 0.0, 0.0, 0.0]
         self._last_motor_cmd_time = [0.0, 0.0, 0.0, 0.0]
         self._last_cmd_direction = [0, 0, 0, 0]
+        self._crc_enabled = False
         self.battery.charge_percent = 100.0
         self._health = 100.0
         self._dead = False

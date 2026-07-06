@@ -423,10 +423,12 @@ class Renderer:
         if not snapshot.has_telemetry:
             return ["BAT:--", "ALT:--", "MASS:--", "HP:--",
                     "POSX:--", "POSY:--",
-                    "ROL:--", "PIT:--", "YAW:--"]
+                    "ROL:--", "PIT:--", "YAW:--",
+                    "CRC:--"]
 
         x, y, z = snapshot.position
         roll, pitch, yaw = snapshot.attitude_deg
+        crc_label = "CRC:ON" if snapshot.crc_enabled else "CRC:OFF"
         return [
             f"BAT:{snapshot.battery_percent:.0f}%",
             f"ALT:{z:.1f}",
@@ -437,6 +439,7 @@ class Renderer:
             f"ROL:{roll:.1f}",
             f"PIT:{pitch:.1f}",
             f"YAW:{yaw:.1f}",
+            crc_label,
         ]
 
     # -- HUD: command log (SENT vs RCVD) ----------------------------------------
@@ -445,7 +448,7 @@ class Renderer:
             return
         margin = 14
         line_h = self._font._size + 6
-        telemetry_height = 9 * (self._font._size + 6)
+        telemetry_height = 10 * (self._font._size + 6)
         sent_x = margin
         rcvd_x = margin + 85
 
@@ -737,14 +740,18 @@ class Renderer:
                            py + MINIMAP_MOTOR_DOT_RADIUS * np.sin(a))
             glEnd()
 
-        # X at center (body axes, rotated by yaw)
+        # X at center with arms pointing to the 4 motor diagonals
         arm = MINIMAP_X_ARM
+        c45 = np.cos(uav_yaw + np.pi / 4)
+        s45 = np.sin(uav_yaw + np.pi / 4)
+        c_m45 = np.cos(uav_yaw - np.pi / 4)
+        s_m45 = np.sin(uav_yaw - np.pi / 4)
         glColor3f(*MINIMAP_UAV_COLOR)
         glBegin(GL_LINES)
-        glVertex2f(cx - arm * cos_yaw, cy - arm * sin_yaw)
-        glVertex2f(cx + arm * cos_yaw, cy + arm * sin_yaw)
-        glVertex2f(cx + arm * sin_yaw, cy - arm * cos_yaw)
-        glVertex2f(cx - arm * sin_yaw, cy + arm * cos_yaw)
+        glVertex2f(cx - arm * c45, cy - arm * s45)
+        glVertex2f(cx + arm * c45, cy + arm * s45)
+        glVertex2f(cx - arm * c_m45, cy - arm * s_m45)
+        glVertex2f(cx + arm * c_m45, cy + arm * s_m45)
         glEnd()
 
         # Disable scissor, draw border on top (always complete)

@@ -4,10 +4,9 @@ real GNU Radio signal processing -- not a simulated stand-in.
 Every payload handed to `GnuRadioChannel._transmit()` is genuinely:
   1. Framed with a preamble + access code + CRC32 + flush padding.
   2. GMSK-modulated into complex baseband samples (`digital.gmsk_mod`).
-  3. Pushed through a simulated RF channel with AWGN noise
-     (`channels.channel_model`) -- this is where a future Jammer would
-     simply crank up the noise/frequency-offset, with zero changes
-     anywhere else in the app.
+  3.    Pushed through a simulated RF channel with AWGN noise
+     (`channels.channel_model`). The noise voltage is updated in
+     real time by jammers via the `noise_voltage` property.
   4. GMSK-demodulated, bit-synchronized against the access code
      (`digital.correlate_access_code_tag_bb`), and CRC-checked.
 
@@ -51,11 +50,11 @@ _PREAMBLE = b"\x55\x55"                 # alternating bits: lets clock recovery 
 _ACCESS_CODE_BYTES = b"\xac\xdd\xa4\xe2"  # arbitrary but fixed sync word
 _ACCESS_CODE_BITS = "".join(f"{byte:08b}" for byte in _ACCESS_CODE_BYTES)
 _TAIL_PADDING = b"\x55" * 8              # lets the filter pipeline fully flush
-_ACCESS_CODE_THRESHOLD = 2               # bit errors tolerated in the sync word
+_ACCESS_CODE_THRESHOLD = 4               # bit errors tolerated in the sync word
 _CRC_SIZE_BYTES = 4
 
 DEFAULT_SAMPLES_PER_SYMBOL = 4
-DEFAULT_NOISE_VOLTAGE = 0.05             # AWGN level; a future Jammer raises this
+DEFAULT_NOISE_VOLTAGE = 0.005            # AWGN level; jammers raise this in real time
 
 
 def _run_burst(
@@ -63,16 +62,13 @@ def _run_burst(
     samples_per_symbol: int,
     noise_voltage: float,
     frequency_offset: float,
+    crc_enabled: bool = False,
 ) -> Tuple[Optional[bytes], np.ndarray]:
-    """Modulate `payload`, push it through a simulated noisy channel, and
-    demodulate it back.
-
-    Returns (recovered_payload, raw_real_samples) where raw_real_samples is
-    the real part of the complex baseband signal after the channel (before
-    demodulation), normalized to [-1, 1].  Only the portion corresponding
-    to the first payload byte is returned (8 bits × samples_per_symbol
-    samples).  The raw signal is returned even when the packet is lost, so
-    the HUD can show what the noise looks like.
+    """
+    Returns (recovered_payload, raw_real_samples).
+    When `crc_enabled` is True, packets with CRC mismatch are dropped (None).
+    When False, whatever bits come out are delivered — the jammer may corrupt
+    them into a different valid command.
     """
     crc = zlib.crc32(payload).to_bytes(_CRC_SIZE_BYTES, "big")
     frame = _PREAMBLE + _ACCESS_CODE_BYTES + payload + crc + _TAIL_PADDING
@@ -121,9 +117,11 @@ def _run_burst(
         return None, raw_real  # truncated
 
     recovered = bytes(np.packbits(recovered_bits))
-    recovered_payload, recovered_crc = recovered[: len(payload)], recovered[len(payload):]
-    if zlib.crc32(recovered_payload).to_bytes(_CRC_SIZE_BYTES, "big") != recovered_crc:
-        return None, raw_real  # CRC mismatch
+    recovered_payload = recovered[: len(payload)]
+    if crc_enabled:
+        recovered_crc = recovered[len(payload): len(payload) + _CRC_SIZE_BYTES]
+        if zlib.crc32(recovered_payload).to_bytes(_CRC_SIZE_BYTES, "big") != recovered_crc:
+            return None, raw_real  # CRC mismatch — silent drop
 
     return recovered_payload, raw_real
 
@@ -139,13 +137,24 @@ def _worker_process(
 
     Everything in here runs in an isolated process, so the TPB scheduler's
     internal threads cannot interfere with the main process's GLX context.
+
+    Messages on `job_queue` are tagged tuples: ``("payload", bytes)`` for
+    actual transmissions, or ``("noise", float)`` to update the noise level.
     """
     random.seed()
+    crc_enabled = False
 
     while True:
-        payload = job_queue.get()
+        msg = job_queue.get()
+        if isinstance(msg, tuple) and msg[0] == "noise":
+            noise_voltage = msg[1]
+            continue
+        if isinstance(msg, tuple) and msg[0] == "crc":
+            crc_enabled = msg[1]
+            continue
+        payload = msg if isinstance(msg, bytes) else msg[1]
         recovered, raw_samples = _run_burst(
-            payload, samples_per_symbol, noise_voltage, frequency_offset
+            payload, samples_per_symbol, noise_voltage, frequency_offset, crc_enabled
         )
         serialised = pickle.dumps(raw_samples)
         result_queue.put((recovered, serialised, time.monotonic()))
@@ -170,6 +179,8 @@ class GnuRadioChannel:
         max_pending: int = 256,
     ) -> None:
         self._signal_history_seconds = signal_history_seconds
+        self._noise_voltage = noise_voltage
+        self._crc_enabled = False
 
         self._tx_log: Deque[Tuple[float, bytes]] = deque()
         self._rx_log: Deque[Tuple[float, bytes]] = deque()
@@ -194,13 +205,41 @@ class GnuRadioChannel:
         )
         self._worker.start()
 
+    @property
+    def noise_voltage(self) -> float:
+        """Current noise level applied by the GNU Radio subprocess."""
+        return self._noise_voltage
+
+    @noise_voltage.setter
+    def noise_voltage(self, value: float) -> None:
+        """Update the noise level in the subprocess in real time."""
+        self._noise_voltage = value
+        try:
+            self._job_queue.put_nowait(("noise", value))
+        except queue.Full:
+            pass
+
+    @property
+    def crc_enabled(self) -> bool:
+        """Whether the receiver checks CRC32 before delivering packets."""
+        return self._crc_enabled
+
+    @crc_enabled.setter
+    def crc_enabled(self, value: bool) -> None:
+        """Enable/disable CRC checking in the subprocess in real time."""
+        self._crc_enabled = value
+        try:
+            self._job_queue.put_nowait(("crc", bool(value)))
+        except queue.Full:
+            pass
+
     # -- transmit side -------------------------------------------------------
     def _transmit(self, payload: bytes) -> None:
         now = time.monotonic()
         self._tx_log.append((now, payload))
         self._prune(self._tx_log, now)
         try:
-            self._job_queue.put_nowait(payload)
+            self._job_queue.put_nowait(("payload", payload))
         except queue.Full:
             pass  # the link is saturated -- a real radio would drop it too
 

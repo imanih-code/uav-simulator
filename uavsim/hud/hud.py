@@ -42,11 +42,40 @@ class HUDSnapshot:
 
     command_log: Tuple[Tuple[str, bool], ...] = ()  # (label, is_valid) — RCVD by UAV
     sent_log: Tuple[str, ...] = ()                  # SENT by operator
+    crc_enabled: bool = False
 
 _OPCODE_LABELS = {
     0: "THR+", 1: "THR-", 2: "ARM", 3: "DSRM", 4: "CUT",
     5: "THR+A", 6: "THR-A",
 }
+
+# Physical plausibility bounds for telemetry fields — corrupted packets
+# from jammer interference can produce garbage values, and we prefer to
+# show "ERR" over a number that overflows the HUD layout.
+_WORLD_BOUND = 500.0
+_VELOCITY_MAX = 500.0
+_ANGLE_MAX = 100.0
+_ANGULAR_VEL_MAX = 1000.0
+
+
+def _is_plausible(packet: TelemetryPacket) -> bool:
+    if not all(-_WORLD_BOUND <= v <= _WORLD_BOUND for v in packet.position):
+        return False
+    if not all(-_VELOCITY_MAX <= v <= _VELOCITY_MAX for v in packet.velocity):
+        return False
+    if not all(-_ANGLE_MAX <= v <= _ANGLE_MAX for v in packet.attitude_rpy):
+        return False
+    if not all(-_ANGULAR_VEL_MAX <= v <= _ANGULAR_VEL_MAX for v in packet.angular_velocity):
+        return False
+    if not all(0.0 <= v <= 1.0 for v in packet.motor_throttle):
+        return False
+    if not 0.0 <= packet.battery_percent <= 100.0:
+        return False
+    if not 0.0 <= packet.health_percent <= 100.0:
+        return False
+    if not 0.1 <= packet.mass <= 10.0:
+        return False
+    return True
 
 
 class HUD:
@@ -92,8 +121,9 @@ class HUD:
                     command_log.append((label, True))
 
         sent_log = tuple(self._operator.sent_log)
+        crc_enabled = packet.crc_enabled if packet is not None else False
 
-        if packet is None:
+        if packet is None or not _is_plausible(packet):
             return HUDSnapshot(
                 has_telemetry=False,
                 uplink_bandwidth_bps=uplink_bandwidth,
@@ -105,6 +135,7 @@ class HUD:
                 now=now,
                 command_log=tuple(command_log),
                 sent_log=sent_log,
+                crc_enabled=crc_enabled,
             )
 
         attitude_deg = tuple(np.degrees(packet.attitude_rpy).tolist())
@@ -126,4 +157,5 @@ class HUD:
             now=now,
             command_log=tuple(command_log),
             sent_log=sent_log,
+            crc_enabled=crc_enabled,
         )

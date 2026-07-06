@@ -57,6 +57,7 @@ class InputState:
     toggle_camera_mode: bool = False
     reset: bool = False
     toggle_pause: bool = False
+    toggle_crc: bool = False
     place_jammers: bool = False
     jammer_count_up: bool = False
     jammer_count_down: bool = False
@@ -109,6 +110,8 @@ class Window:
                     state.reset = True
                 elif event.key == pygame.K_p:
                     state.toggle_pause = True
+                elif event.key == pygame.K_c:
+                    state.toggle_crc = True
                 elif event.key == pygame.K_j:
                     state.place_jammers = True
                 elif event.key in (pygame.K_EQUALS, pygame.K_PLUS):

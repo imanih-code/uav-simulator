@@ -42,7 +42,7 @@ from uavsim.rendering.window import Window
 from uavsim.world.environment import World
 
 TARGET_FPS = 60
-_BASE_NOISE = 0.05
+_BASE_NOISE = 0.005
 _JAMMER_COUNT = 6
 
 
@@ -170,6 +170,11 @@ def main() -> None:
                 uav.reset()
                 reset_jammers(jammers, world.extent_half, uav.body.position,
                               world.ground.ground_z)
+
+            # CRC toggle works even when paused
+            if input_state.toggle_crc:
+                command_link.crc_enabled = not command_link.crc_enabled
+            uav.crc_enabled = command_link.crc_enabled
 
             if paused:
                 snapshot = hud.refresh()
