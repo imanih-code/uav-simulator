@@ -113,15 +113,15 @@ class UAV:
         self._was_airborne = False
         self._health = 100.0
         self._dead = False
-        self._crc_enabled = False
+        self._radio_enabled = False
 
     @property
-    def crc_enabled(self) -> bool:
-        return self._crc_enabled
+    def radio_enabled(self) -> bool:
+        return self._radio_enabled
 
-    @crc_enabled.setter
-    def crc_enabled(self, value: bool) -> None:
-        self._crc_enabled = value
+    @radio_enabled.setter
+    def radio_enabled(self, value: bool) -> None:
+        self._radio_enabled = value
 
     # -- command handling --------------------------------------------------
     def _process_incoming_commands(self) -> None:
@@ -285,7 +285,6 @@ class UAV:
             mass=self.config.total_mass,
             command_log=tuple(self._command_log),
             health_percent=self._health,
-            crc_enabled=self._crc_enabled,
         )
         self._telemetry_output.send(packet.encode())
 
@@ -293,6 +292,10 @@ class UAV:
     def update(self, dt: float) -> None:
         """Advance the UAV by one simulation tick of length `dt` seconds."""
         if dt <= 0.0:
+            return
+        if not self._radio_enabled:
+            self._command_input.receive_all()  # drain stale packets
+            self._time_since_last_telemetry = 0.0
             return
         self._process_incoming_commands()
         self._integrate_physics(dt)
@@ -310,14 +313,15 @@ class UAV:
         self._raw_throttle = [0.0, 0.0, 0.0, 0.0]
         self._last_motor_cmd_time = [0.0, 0.0, 0.0, 0.0]
         self._last_cmd_direction = [0, 0, 0, 0]
-        self._crc_enabled = False
+        self._radio_enabled = False
         self.battery.charge_percent = 100.0
         self._health = 100.0
         self._dead = False
         self.is_grounded = True
         self._command_log.clear()
         self._was_airborne = False
-        # Drain any pending command packets
+        self._time_since_last_telemetry = 0.0
+        # Drain any pending command packets (extra safety — clear() also drains)
         self._command_input.receive_all()
 
     @property

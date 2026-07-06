@@ -18,9 +18,9 @@ import numpy as np
 # + angular_velocity(3) + motor_throttle(4) + battery_percent(1) + mass(1)
 # + health_percent(1)
 # -> 20 doubles, network byte order.
-# Appended: crc_enabled(1) + command_log (10 ints) — each int encodes
+# Appended: command_log (10 ints) — each int encodes
 # (opcode<<16)|(motor_id<<8)|valid_flag.
-_STRUCT_FORMAT = "!20d1i10i"
+_STRUCT_FORMAT = "!20d10i"
 PACKET_SIZE = struct.calcsize(_STRUCT_FORMAT)
 
 
@@ -38,7 +38,6 @@ class TelemetryPacket:
     mass: float                   # kg, body + all motors combined
     health_percent: float = 100.0
     command_log: Tuple[Tuple[int, int, bool], ...] = ()  # (opcode, motor, valid)
-    crc_enabled: bool = False
 
     _LOG_SLOTS = 10
 
@@ -61,7 +60,6 @@ class TelemetryPacket:
             self.battery_percent,
             self.mass,
             self.health_percent,
-            int(self.crc_enabled),
             *log_ints,
         )
 
@@ -71,8 +69,7 @@ class TelemetryPacket:
             raise ValueError(f"Expected {PACKET_SIZE} bytes, got {len(data)}")
 
         values = struct.unpack(_STRUCT_FORMAT, data)
-        crc_flag = bool(values[20])
-        log_ints = values[21:31]
+        log_ints = values[20:30]
         command_log = []
         for v in log_ints:
             if v == 0:
@@ -95,6 +92,5 @@ class TelemetryPacket:
             battery_percent=values[17],
             mass=values[18],
             health_percent=values[19],
-            crc_enabled=crc_flag,
             command_log=tuple(command_log),
         )

@@ -168,21 +168,28 @@ def main() -> None:
                 camera.toggle_mode(uav.body.position)
             if input_state.reset:
                 uav.reset()
+                command_link.clear()
+                telemetry_link.clear()
                 reset_jammers(jammers, world.extent_half, uav.body.position,
                               world.ground.ground_z)
 
-            # CRC toggle works even when paused
-            if input_state.toggle_crc:
-                command_link.crc_enabled = not command_link.crc_enabled
-            uav.crc_enabled = command_link.crc_enabled
+            worker_error = ""
+            if not command_link.worker_alive:
+                worker_error = f"CMD LINK: {command_link._worker_crashed_info}"
+            elif not telemetry_link.worker_alive:
+                worker_error = f"TLM LINK: {telemetry_link._worker_crashed_info}"
 
             if paused:
-                snapshot = hud.refresh()
+                snapshot = hud.refresh(worker_error=worker_error)
             else:
+                # Update noise before sending anything so the first post-reset
+                # command doesn't use stale high noise from a previous jammer.
+                update_jammer_noise(jammers, uav, command_link, telemetry_link)
+                if input_state.motor_keys and not uav.radio_enabled:
+                    uav.radio_enabled = True
                 operator.handle_pressed_keys(input_state.motor_keys)
                 uav.update(dt)
-                update_jammer_noise(jammers, uav, command_link, telemetry_link)
-                snapshot = hud.refresh()
+                snapshot = hud.refresh(worker_error=worker_error)
 
             camera.update(dt, uav.body.position, input_state.arrow_keys, input_state.mouse_delta)
 

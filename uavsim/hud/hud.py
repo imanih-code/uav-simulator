@@ -42,7 +42,7 @@ class HUDSnapshot:
 
     command_log: Tuple[Tuple[str, bool], ...] = ()  # (label, is_valid) — RCVD by UAV
     sent_log: Tuple[str, ...] = ()                  # SENT by operator
-    crc_enabled: bool = False
+    worker_error: str = ""
 
 _OPCODE_LABELS = {
     0: "THR+", 1: "THR-", 2: "ARM", 3: "DSRM", 4: "CUT",
@@ -83,7 +83,7 @@ class HUD:
         self._operator = operator
         self._uav_command_input = uav_command_input
 
-    def refresh(self) -> HUDSnapshot:
+    def refresh(self, worker_error: str = "") -> HUDSnapshot:
         """Pull the freshest telemetry plus live channel stats."""
         packet = self._operator.poll_telemetry()
         now = time.monotonic()
@@ -121,7 +121,6 @@ class HUD:
                     command_log.append((label, True))
 
         sent_log = tuple(self._operator.sent_log)
-        crc_enabled = packet.crc_enabled if packet is not None else False
 
         if packet is None or not _is_plausible(packet):
             return HUDSnapshot(
@@ -135,7 +134,7 @@ class HUD:
                 now=now,
                 command_log=tuple(command_log),
                 sent_log=sent_log,
-                crc_enabled=crc_enabled,
+                worker_error=worker_error,
             )
 
         attitude_deg = tuple(np.degrees(packet.attitude_rpy).tolist())
@@ -157,5 +156,5 @@ class HUD:
             now=now,
             command_log=tuple(command_log),
             sent_log=sent_log,
-            crc_enabled=crc_enabled,
+            worker_error=worker_error,
         )

@@ -139,6 +139,8 @@ class Renderer:
         self._draw_minimap(jammers)
         if paused:
             self._draw_pause_overlay(len(jammers))
+        if snapshot.worker_error:
+            self._draw_worker_error(snapshot.worker_error)
         self._end_hud_overlay()
 
     # -- world ---------------------------------------------------------------
@@ -423,12 +425,10 @@ class Renderer:
         if not snapshot.has_telemetry:
             return ["BAT:--", "ALT:--", "MASS:--", "HP:--",
                     "POSX:--", "POSY:--",
-                    "ROL:--", "PIT:--", "YAW:--",
-                    "CRC:--"]
+                    "ROL:--", "PIT:--", "YAW:--"]
 
         x, y, z = snapshot.position
         roll, pitch, yaw = snapshot.attitude_deg
-        crc_label = "CRC:ON" if snapshot.crc_enabled else "CRC:OFF"
         return [
             f"BAT:{snapshot.battery_percent:.0f}%",
             f"ALT:{z:.1f}",
@@ -439,7 +439,6 @@ class Renderer:
             f"ROL:{roll:.1f}",
             f"PIT:{pitch:.1f}",
             f"YAW:{yaw:.1f}",
-            crc_label,
         ]
 
     # -- HUD: command log (SENT vs RCVD) ----------------------------------------
@@ -763,6 +762,16 @@ class Renderer:
         glVertex2f(mx + map_size, my + map_size)
         glVertex2f(mx, my + map_size)
         glEnd()
+
+    def _draw_worker_error(self, error: str) -> None:
+        lines = error.split("\n")
+        line_h = self._font._size + 4
+        margin = 8
+        x = margin
+        y = margin + line_h * len(lines)
+        for line in reversed(lines):
+            self._font.draw(line, x, y, colour=(1.0, 0.3, 0.3))
+            y -= line_h
 
     def _draw_pause_overlay(self, jammer_count: int) -> None:
         cx = self.hud_width / 2.0

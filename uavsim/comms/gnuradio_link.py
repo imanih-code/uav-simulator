@@ -42,6 +42,7 @@ from typing import Deque, List, Optional, Tuple
 import numpy as np
 
 os.environ.pop("GR_SCHEDULER", None)  # only TPB exists in GR 3.10 — suppress spurious warning
+import traceback
 from gnuradio import blocks, channels, digital, gr
 
 # -- RF link constants, validated empirically against this exact GNU Radio
@@ -62,17 +63,15 @@ def _run_burst(
     samples_per_symbol: int,
     noise_voltage: float,
     frequency_offset: float,
-    crc_enabled: bool = False,
 ) -> Tuple[Optional[bytes], np.ndarray]:
     """
     Returns (recovered_payload, raw_real_samples).
-    When `crc_enabled` is True, packets with CRC mismatch are dropped (None).
-    When False, whatever bits come out are delivered — the jammer may corrupt
-    them into a different valid command.
+    Packets with CRC mismatch are dropped (None).
     """
     crc = zlib.crc32(payload).to_bytes(_CRC_SIZE_BYTES, "big")
     frame = _PREAMBLE + _ACCESS_CODE_BYTES + payload + crc + _TAIL_PADDING
 
+    # gmsk_mod(do_unpack=True) by default internally unpacks bytes to bits
     source = blocks.vector_source_b(list(frame), False)
     modulator = digital.gmsk_mod(samples_per_symbol=samples_per_symbol, bt=0.35)
     channel = channels.channel_model(
@@ -94,7 +93,9 @@ def _run_burst(
     top_block.run()
 
     # Raw signal: real part of the first payload byte (after preamble + access code)
-    prefix_symbols = (len(_PREAMBLE) + len(_ACCESS_CODE_BYTES)) * 8
+    prefix_bytes = (len(_PREAMBLE) + len(_ACCESS_CODE_BYTES))
+    byte0_bytes = 1
+    prefix_symbols = prefix_bytes * 8
     byte0_symbols = 8
     start_sample = prefix_symbols * samples_per_symbol
     end_sample = (prefix_symbols + byte0_symbols) * samples_per_symbol
@@ -105,23 +106,25 @@ def _run_burst(
     if max_abs > 0:
         raw_real = raw_real / max_abs
 
-    # Demodulated bits
+    # Demodulated bits — 1 byte per bit (0 or 1)
     bits = np.array(sink.data(), dtype=np.uint8)
     sync_offsets = [tag.offset for tag in sink.tags() if str(tag.key) == "sync"]
     if not sync_offsets:
-        return None, raw_real  # no sync — return raw signal anyway
+        return None, raw_real  # no sync
 
+    # In this GR 3.10 build, correlate_access_code_tag_bb tags the first bit
+    # AFTER the access code (END).  No skip needed — payload starts here.
     needed_bits = (len(payload) + _CRC_SIZE_BYTES) * 8
-    recovered_bits = bits[sync_offsets[0]: sync_offsets[0] + needed_bits]
+    start = sync_offsets[0]
+    recovered_bits = bits[start: start + needed_bits]
     if len(recovered_bits) < needed_bits:
         return None, raw_real  # truncated
 
     recovered = bytes(np.packbits(recovered_bits))
     recovered_payload = recovered[: len(payload)]
-    if crc_enabled:
-        recovered_crc = recovered[len(payload): len(payload) + _CRC_SIZE_BYTES]
-        if zlib.crc32(recovered_payload).to_bytes(_CRC_SIZE_BYTES, "big") != recovered_crc:
-            return None, raw_real  # CRC mismatch — silent drop
+    recovered_crc = recovered[len(payload): len(payload) + _CRC_SIZE_BYTES]
+    if zlib.crc32(recovered_payload).to_bytes(_CRC_SIZE_BYTES, "big") != recovered_crc:
+        return None, raw_real
 
     return recovered_payload, raw_real
 
@@ -138,24 +141,38 @@ def _worker_process(
     Everything in here runs in an isolated process, so the TPB scheduler's
     internal threads cannot interfere with the main process's GLX context.
 
-    Messages on `job_queue` are tagged tuples: ``("payload", bytes)`` for
-    actual transmissions, or ``("noise", float)`` to update the noise level.
+    Messages on `job_queue` are tagged tuples:
+    - ``("payload", bytes)`` for actual transmissions
+    - ``("noise", float)`` to update the noise level
+    - ``("reset",)`` to discard any in-flight job and return to idle
     """
     random.seed()
-    crc_enabled = False
+    try:
+        result_queue.put(("worker_started",))
+    except Exception:
+        pass
 
     while True:
         msg = job_queue.get()
-        if isinstance(msg, tuple) and msg[0] == "noise":
-            noise_voltage = msg[1]
-            continue
-        if isinstance(msg, tuple) and msg[0] == "crc":
-            crc_enabled = msg[1]
-            continue
+        if isinstance(msg, tuple):
+            tag = msg[0]
+            if tag == "noise":
+                noise_voltage = msg[1]
+                continue
+            if tag == "reset":
+                continue  # discard any in-flight job and wait for next msg
         payload = msg if isinstance(msg, bytes) else msg[1]
-        recovered, raw_samples = _run_burst(
-            payload, samples_per_symbol, noise_voltage, frequency_offset, crc_enabled
-        )
+        try:
+            recovered, raw_samples = _run_burst(
+                payload, samples_per_symbol, noise_voltage, frequency_offset
+            )
+        except Exception as e:
+            tb = traceback.format_exc()
+            try:
+                result_queue.put(("worker_error", repr(e), tb))
+            except Exception:
+                pass
+            continue
         serialised = pickle.dumps(raw_samples)
         result_queue.put((recovered, serialised, time.monotonic()))
 
@@ -180,13 +197,14 @@ class GnuRadioChannel:
     ) -> None:
         self._signal_history_seconds = signal_history_seconds
         self._noise_voltage = noise_voltage
-        self._crc_enabled = False
 
         self._tx_log: Deque[Tuple[float, bytes]] = deque()
         self._rx_log: Deque[Tuple[float, bytes]] = deque()
         self._rx_raw_log: Deque[Tuple[float, np.ndarray]] = deque()
 
         self._rx_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=max_pending)
+        self._worker_crashed: bool = False
+        self._worker_crashed_info: str = ""
 
         pending = max(max_pending, 1024)
         ctx = mp.get_context("spawn")
@@ -204,6 +222,18 @@ class GnuRadioChannel:
             daemon=True,
         )
         self._worker.start()
+        # Brief polling to confirm the subprocess entered the main loop
+        for _ in range(50):
+            try:
+                item = self._result_queue.get_nowait()
+                self._handle_control_message(item)
+            except queue.Empty:
+                pass
+            time.sleep(0.002)
+
+    @property
+    def worker_alive(self) -> bool:
+        return not self._worker_crashed and self._worker.is_alive()
 
     @property
     def noise_voltage(self) -> float:
@@ -219,20 +249,6 @@ class GnuRadioChannel:
         except queue.Full:
             pass
 
-    @property
-    def crc_enabled(self) -> bool:
-        """Whether the receiver checks CRC32 before delivering packets."""
-        return self._crc_enabled
-
-    @crc_enabled.setter
-    def crc_enabled(self, value: bool) -> None:
-        """Enable/disable CRC checking in the subprocess in real time."""
-        self._crc_enabled = value
-        try:
-            self._job_queue.put_nowait(("crc", bool(value)))
-        except queue.Full:
-            pass
-
     # -- transmit side -------------------------------------------------------
     def _transmit(self, payload: bytes) -> None:
         now = time.monotonic()
@@ -244,13 +260,25 @@ class GnuRadioChannel:
             pass  # the link is saturated -- a real radio would drop it too
 
     # -- receive side ---------------------------------------------------------
-    def _receive(self) -> Optional[bytes]:
-        # Drain all available results from the subprocess
+    def _handle_control_message(self, item: tuple) -> None:
+        tag = item[0]
+        if tag == "worker_error":
+            self._worker_crashed = True
+            self._worker_crashed_info = f"[{tag}] {item[1]}\n{item[2]}"
+            print(self._worker_crashed_info, flush=True)
+        # "worker_started" is silently consumed
+
+    def _drain(self) -> None:
+        """Drain the result queue, populating logs and the rx queue."""
         while True:
             try:
-                recovered, serialised, now = self._result_queue.get_nowait()
-            except Exception:
+                item = self._result_queue.get_nowait()
+            except queue.Empty:
                 break
+            if isinstance(item, tuple) and item and isinstance(item[0], str):
+                self._handle_control_message(item)
+                continue
+            recovered, serialised, now = item
             raw_samples = pickle.loads(serialised)
             self._rx_raw_log.append((now, raw_samples))
             self._prune(self._rx_raw_log, now)
@@ -261,10 +289,52 @@ class GnuRadioChannel:
                     self._rx_queue.put_nowait(recovered)
                 except queue.Full:
                     pass
+
+    def _receive(self) -> Optional[bytes]:
+        self._drain()
         try:
             return self._rx_queue.get_nowait()
         except queue.Empty:
             return None
+
+    # -- reset / clear ---------------------------------------------------------
+    def clear(self, reset_noise: float = 0.0) -> None:
+        self._tx_log.clear()
+        self._rx_log.clear()
+        self._rx_raw_log.clear()
+        self._discard_all()
+        # Reset noise to a clean level so the worker doesn't carry stale
+        # high noise from a previous jammer encounter.
+        self.noise_voltage = reset_noise
+        try:
+            self._job_queue.put_nowait(("reset",))
+        except queue.Full:
+            pass
+        time.sleep(0.02)
+        self._discard_all()
+        # Tell the worker to discard any in-flight job
+        try:
+            self._job_queue.put_nowait(("reset",))
+        except queue.Full:
+            pass
+        # The worker might finish its current burst AFTER the first drain
+        # but BEFORE receiving ("reset",).  Drain again to catch that stray.
+        time.sleep(0.02)  # generous for a ~10ms flowgraph
+        self._discard_all()
+
+    def _discard_all(self) -> None:
+        while True:
+            try:
+                item = self._result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(item, tuple) and item and isinstance(item[0], str):
+                self._handle_control_message(item)
+        while True:
+            try:
+                self._rx_queue.get_nowait()
+            except queue.Empty:
+                break
 
     # -- stats used by the HUD -------------------------------------------------
     def _prune(self, log: Deque[Tuple[float, bytes]], now: float) -> None:
