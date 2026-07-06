@@ -106,6 +106,7 @@ class UAV:
         self._time_since_last_telemetry = 0.0
         self._raw_throttle: List[float] = [0.0, 0.0, 0.0, 0.0]
         self._last_motor_cmd_time: List[float] = [0.0, 0.0, 0.0, 0.0]
+        self._last_cmd_direction: List[int] = [0, 0, 0, 0]  # +1 UP, -1 DOWN, 0 none
         self._armed = True
         self.is_grounded = True
         self._command_log: deque = deque(maxlen=10)
@@ -136,21 +137,25 @@ class UAV:
                 1.0, self._raw_throttle[command.motor_id] + self.motors[0].throttle_step_up
             )
             self._last_motor_cmd_time[command.motor_id] = time.time()
+            self._last_cmd_direction[command.motor_id] = 1
         elif command.opcode == CommandOpcode.THROTTLE_DOWN:
             self._raw_throttle[command.motor_id] = max(
                 0.0, self._raw_throttle[command.motor_id] - self.motors[0].throttle_step_down
             )
             self._last_motor_cmd_time[command.motor_id] = time.time()
+            self._last_cmd_direction[command.motor_id] = -1
         elif command.opcode == CommandOpcode.THROTTLE_UP_ALL:
             now = time.time()
             for i in range(4):
                 self._raw_throttle[i] = min(1.0, self._raw_throttle[i] + self.motors[0].throttle_step_up)
                 self._last_motor_cmd_time[i] = now
+                self._last_cmd_direction[i] = 1
         elif command.opcode == CommandOpcode.THROTTLE_DOWN_ALL:
             now = time.time()
             for i in range(4):
                 self._raw_throttle[i] = max(0.0, self._raw_throttle[i] - self.motors[0].throttle_step_down)
                 self._last_motor_cmd_time[i] = now
+                self._last_cmd_direction[i] = -1
         elif command.opcode == CommandOpcode.ARM:
             self._armed = True
         elif command.opcode == CommandOpcode.DISARM:
@@ -159,6 +164,7 @@ class UAV:
             self._armed = False
             for i in range(4):
                 self._raw_throttle[i] = 0.0
+                self._last_cmd_direction[i] = 0
 
     # -- hover controller ----------------------------------------------------
     # Gain that opposes vertical velocity to produce a natural altitude hold.
@@ -191,9 +197,17 @@ class UAV:
                 -roll_corr - pitch_corr,
                 -roll_corr + pitch_corr,
             ])
+            # When any motor is being actively commanded DOWN, use max_raw as
+            # the base so the drone tilts instead of dragging everything down.
+            any_down = any(
+                (now - self._last_motor_cmd_time[i] < self._MOTOR_TIMEOUT)
+                and self._last_cmd_direction[i] == -1
+                for i in range(4)
+            )
+            base_raw = max(self._raw_throttle) if any_down else min_raw
             for i in range(4):
                 if now - self._last_motor_cmd_time[i] >= self._MOTOR_TIMEOUT:
-                    self.motors[i].throttle = np.clip(min_raw + corrections[i], 0.0, 1.0)
+                    self.motors[i].throttle = np.clip(base_raw + corrections[i], 0.0, 1.0)
                 else:
                     self.motors[i].throttle = self._raw_throttle[i]
         else:
@@ -284,7 +298,8 @@ class UAV:
         for motor in self.motors:
             motor.throttle = 0.0
         self._raw_throttle = [0.0, 0.0, 0.0, 0.0]
-        self._last_pair_cmd_time = [0.0, 0.0]
+        self._last_motor_cmd_time = [0.0, 0.0, 0.0, 0.0]
+        self._last_cmd_direction = [0, 0, 0, 0]
         self.battery.charge_percent = 100.0
         self._health = 100.0
         self._dead = False
