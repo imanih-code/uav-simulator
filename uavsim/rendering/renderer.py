@@ -45,7 +45,7 @@ from OpenGL.GLU import gluLookAt, gluProject
 from uavsim.entities.jammer import Jammer
 from uavsim.entities.uav import UAV
 from uavsim.hud.hud import SIGNAL_WINDOW_SECONDS, HUDSnapshot
-from uavsim.rendering.vector_font import draw_text
+from uavsim.rendering.ttf_font import TTFFont
 from uavsim.world.environment import WORLD_EXTENT_HALF, World
 
 GROUND_COLOR = (0.2, 0.25, 0.3)
@@ -104,6 +104,7 @@ class Renderer:
         self.hud_height = hud_height
         self._motor_labels: List[Tuple[float, float, int]] = []
         self._noise_history: deque = deque(maxlen=300)
+        self._font = TTFFont("assets/fonts/7-segment.ttf", size=14)
 
     def draw_scene(self, camera_eye: np.ndarray, camera_target: np.ndarray,
                    jammers: List[Jammer] = []) -> None:
@@ -368,15 +369,16 @@ class Renderer:
     def _draw_motor_labels(self) -> None:
         if not self._motor_labels:
             return
+        leader_h = 14.0
         glBegin(GL_LINES)
         for sx, sy, idx in self._motor_labels:
             glColor3f(*UAV_MOTOR_COLORS[idx])
-            leader_h = 14.0
             glVertex2f(sx, sy + leader_h)
             glVertex2f(sx, sy)
-            label = str(idx + 1)
-            draw_text(label, sx - 4, sy + leader_h + 2, 7.0, 10.0, 1.5, self._segment_drawer())
         glEnd()
+        for sx, sy, idx in self._motor_labels:
+            self._font.draw(str(idx + 1), sx - 4, sy + leader_h + 2,
+                            colour=UAV_MOTOR_COLORS[idx])
 
     # -- HUD overlay setup -----------------------------------------------------
     def _begin_hud_overlay(self) -> None:
@@ -400,18 +402,15 @@ class Renderer:
     # -- HUD: numeric telemetry readout -----------------------------------------
     def _draw_telemetry_readout(self, snapshot: HUDSnapshot) -> None:
         margin = 14
-        char_w, char_h, spacing, line_gap = 7.0, 10.0, 2.0, 6.0
-        line_height = char_h + line_gap
+        line_gap = 6
+        line_height = self._font._size + line_gap
 
         lines = self._telemetry_lines(snapshot)
 
-        glColor3f(*HUD_TEXT_COLOR)
-        glBegin(GL_LINES)
-        y = self.hud_height - margin - char_h
+        y = self.hud_height - margin - self._font._size
         for line in lines:
-            draw_text(line, margin, y, char_w, char_h, spacing, self._segment_drawer())
+            self._font.draw(line, margin, y, colour=HUD_TEXT_COLOR)
             y -= line_height
-        glEnd()
 
     @staticmethod
     def _telemetry_lines(snapshot: HUDSnapshot) -> List[str]:
@@ -439,28 +438,21 @@ class Renderer:
         if not snapshot.sent_log and not snapshot.command_log:
             return
         margin = 14
-        char_w, char_h, spacing = 6.0, 9.0, 1.5
-        line_h = char_h + 4
-        telemetry_height = 9 * (10 + 6)
-        # Two columns: SENT left, RCVD right
+        line_h = self._font._size + 6
+        telemetry_height = 9 * (self._font._size + 6)
         sent_x = margin
         rcvd_x = margin + 85
 
         sent_items = list(reversed(snapshot.sent_log))
-        rcvd_items = list(reversed(snapshot.command_log))  # [(label, valid), ...]
+        rcvd_items = list(reversed(snapshot.command_log))
 
         n = max(len(sent_items), len(rcvd_items))
         y = self.hud_height - margin - 10 - telemetry_height - 12 - n * line_h
 
-        # Column headers
-        glBegin(GL_LINES)
         col_header_y = y - line_h + 2
-        glColor3f(0.5, 0.5, 0.5)
-        draw_text("SENT", sent_x, col_header_y, char_w, char_h, spacing, self._segment_drawer())
-        draw_text("RCVD", rcvd_x, col_header_y, char_w, char_h, spacing, self._segment_drawer())
-        glEnd()
+        self._font.draw("SENT", sent_x, col_header_y, colour=(0.5, 0.5, 0.5))
+        self._font.draw("RCVD", rcvd_x, col_header_y, colour=(0.5, 0.5, 0.5))
 
-        glBegin(GL_LINES)
         for i in range(n):
             y += line_h
             sent_label = sent_items[i] if i < len(sent_items) else ""
@@ -469,14 +461,11 @@ class Renderer:
             if sent_label:
                 match = sent_label == rcvd_label and rcvd_valid
                 s_color = HUD_LOG_OK_COLOR if match else HUD_LOG_SENT_COLOR
-                glColor3f(*s_color)
-                draw_text(sent_label, sent_x, y, char_w, char_h, spacing, self._segment_drawer())
+                self._font.draw(sent_label, sent_x, y, colour=s_color)
 
             if rcvd_label:
                 r_color = HUD_LOG_OK_COLOR if rcvd_valid else HUD_LOG_BAD_COLOR
-                glColor3f(*r_color)
-                draw_text(rcvd_label, rcvd_x, y, char_w, char_h, spacing, self._segment_drawer())
-        glEnd()
+                self._font.draw(rcvd_label, rcvd_x, y, colour=r_color)
 
     # -- HUD: TX/RX oscilloscope-style signal panels ----------------------------
     def _draw_signal_panels(self, snapshot: HUDSnapshot) -> None:
@@ -517,13 +506,9 @@ class Renderer:
         glVertex2f(x, y + height)
         glEnd()
 
-        char_w, char_h, spacing = 6.0, 9.0, 1.5
-        glColor3f(*HUD_TEXT_COLOR)
-        glBegin(GL_LINES)
         label_text = f"{label} {bandwidth_bps:.0f}B/S"
-        draw_text(label_text, x + 4, y + height - char_h - 3, char_w, char_h, spacing,
-                   self._segment_drawer())
-        glEnd()
+        self._font.draw(label_text, x + 4, y + height - self._font._size - 3,
+                        colour=HUD_TEXT_COLOR)
 
         window = SIGNAL_WINDOW_SECONDS
         bit_dur = _SIGNAL_BIT_DURATION
@@ -570,11 +555,8 @@ class Renderer:
 
         # Y-axis level labels
         label_x = x + 2
-        glColor3f(*HUD_TEXT_COLOR)
-        glBegin(GL_LINES)
-        draw_text("1", label_x, high_y - char_h - 1, 5.0, 8.0, 1.5, self._segment_drawer())
-        draw_text("0", label_x, low_y - 1, 5.0, 8.0, 1.5, self._segment_drawer())
-        glEnd()
+        self._font.draw("1", label_x, high_y - self._font._size - 1, colour=HUD_TEXT_COLOR)
+        self._font.draw("0", label_x, low_y - 1, colour=HUD_TEXT_COLOR)
 
     # -- HUD: per-motor throttle bars --------------------------------------------
     def _draw_throttle_bars(self, throttle: Tuple[float, float, float, float]) -> None:
@@ -593,13 +575,10 @@ class Renderer:
             glVertex2f(x + bar_width, base_y)
         glEnd()
 
-        glColor3f(*HUD_TEXT_COLOR)
-        glBegin(GL_LINES)
         for i in range(len(throttle)):
             x = margin + i * (bar_width + gap)
-            draw_text(str(i + 1), x + bar_width * 0.3, margin - 2, 6.0, 9.0, 1.5,
-                       self._segment_drawer())
-        glEnd()
+            self._font.draw(str(i + 1), x + bar_width * 0.3, margin - 2,
+                            colour=HUD_TEXT_COLOR)
 
     def _draw_noise_timeline(self, uplink_noise: float, downlink_noise: float) -> None:
         self._noise_history.append((uplink_noise, downlink_noise))
@@ -634,12 +613,9 @@ class Renderer:
         glEnd()
 
         # Label + current values
-        glColor3f(*HUD_TEXT_COLOR)
-        glBegin(GL_LINES)
-        draw_text(f"N {uplink_noise:.2f}/{downlink_noise:.2f}", x + 4,
-                   y + NOISE_PANEL_HEIGHT - 9 - 3, 5.5, 8.0, 1.5,
-                   self._segment_drawer())
-        glEnd()
+        self._font.draw(f"N {uplink_noise:.2f}/{downlink_noise:.2f}", x + 4,
+                        y + NOISE_PANEL_HEIGHT - self._font._size - 3,
+                        colour=HUD_TEXT_COLOR)
 
         # Uplink noise line (TX)
         glColor3f(*HUD_RAW_SIGNAL_COLOR)
@@ -757,22 +733,10 @@ class Renderer:
     def _draw_pause_overlay(self, jammer_count: int) -> None:
         cx = self.hud_width / 2.0
         cy = self.hud_height / 2.0
-        cw, ch, sp = 10.0, 14.0, 3.0
         text = "PAUSED"
-        glColor3f(1.0, 1.0, 0.5)
-        glBegin(GL_LINES)
-        draw_text(text, cx - len(text) * (cw + sp) / 2.0, cy - ch / 2.0, cw, ch, sp,
-                   self._segment_drawer())
-        glEnd()
-
-    @staticmethod
-    def _segment_drawer():
-        def _draw(p1: Tuple[float, float], p2: Tuple[float, float]) -> None:
-            glVertex2f(p1[0], p1[1])
-            glVertex2f(p2[0], p2[1])
-
-        return _draw
-
+        tw = self._font.text_width(text)
+        self._font.draw(text, cx - tw / 2.0, cy - self._font._size / 2.0,
+                        colour=(1.0, 1.0, 0.5))
 
 def _waveform_segments(
     transmissions: Tuple[Tuple[float, bytes], ...],

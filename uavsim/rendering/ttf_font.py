@@ -14,8 +14,6 @@ from __future__ import annotations
 import string
 from typing import Dict, Optional, Tuple
 
-import numpy as np
-
 # OpenGL imports -- the caller must have an active GL context.
 from OpenGL.GL import (
     GL_BLEND,
@@ -31,6 +29,7 @@ from OpenGL.GL import (
     glBindTexture,
     glBlendFunc,
     glColor3f,
+    glDisable,
     glEnable,
     glEnd,
     glGenTextures,
@@ -76,16 +75,12 @@ class TTFFont:
         for ch in chars:
             if ch in ("\t", "\n", "\r", "\x0b", "\x0c"):
                 continue
-            surf = font.render(ch, True, (255, 255, 255))
+            surf = font.render(ch, True, (255, 255, 255, 255))
             w, h = surf.get_size()
             if w == 0 or h == 0:
                 continue
 
-            raw = surf.get_buffer().raw
-            arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
-            r, g, b, a = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2], arr[:, :, 3]
-            rgba = np.dstack((r, g, b, a))
-
+            raw = pygame.image.tostring(surf, "RGBA", True)
             tex_id = glGenTextures(1)
             glBindTexture(GL_TEXTURE_2D, tex_id)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
@@ -94,7 +89,7 @@ class TTFFont:
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
             glTexImage2D(
-                GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba
+                GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, raw
             )
             self._texture_ids[ch] = tex_id
             self._glyph_data[ch] = (w, h, 0, 0)
