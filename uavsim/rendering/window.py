@@ -58,6 +58,7 @@ class InputState:
     reset: bool = False
     toggle_pause: bool = False
     toggle_dssc: bool = False
+    screenshot: bool = False
 
     place_jammers: bool = False
     jammer_count_up: bool = False
@@ -119,6 +120,8 @@ class Window:
                     state.jammer_count_down = True
                 elif event.key == pygame.K_d:
                     state.toggle_dssc = True
+                elif event.key == pygame.K_k:
+                    state.screenshot = True
 
         pressed = pygame.key.get_pressed()
         state.motor_keys = {name for name, code in _MOTOR_KEY_CODES.items() if pressed[code]}

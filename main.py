@@ -29,6 +29,7 @@ from typing import List, Tuple
 
 import numpy as np
 import pygame
+from OpenGL.GL import GL_BACK, GL_RGB, GL_UNSIGNED_BYTE, glReadPixels, glReadBuffer
 
 from uavsim.comms.gateway import CommGatewayInput, CommGatewayOutput
 from uavsim.comms.gnuradio_link import GnuRadioChannel
@@ -141,6 +142,8 @@ def main() -> None:
     reset_jammers(jammers, world.extent_half, uav.body.position, world.ground.ground_z)
 
     paused = False
+    screenshot_count = 0
+    os.makedirs("screenshots", exist_ok=True)
 
     previous_time = time.perf_counter()
     try:
@@ -212,6 +215,16 @@ def main() -> None:
                                command_link.noise_voltage,
                                telemetry_link.noise_voltage,
                                dssc_N=command_link.dssc_N)
+            if input_state.screenshot:
+                screenshot_count += 1
+                glReadBuffer(GL_BACK)
+                w, h = window.width, window.height
+                buf = glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE)
+                surf = pygame.image.fromstring(buf, (w, h), "RGB")
+                surf = pygame.transform.flip(surf, False, True)
+                path = f"screenshots/screenshot_{screenshot_count:04d}.png"
+                pygame.image.save(surf, path)
+
             window.end_frame()
 
             frame_time = time.perf_counter() - now
