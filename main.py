@@ -143,7 +143,7 @@ def main() -> None:
 
     paused = False
     screenshot_count = 0
-    os.makedirs("screenshots", exist_ok=True)
+    os.makedirs("assets/images", exist_ok=True)
 
     previous_time = time.perf_counter()
     try:
@@ -222,7 +222,7 @@ def main() -> None:
                 buf = glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE)
                 surf = pygame.image.fromstring(buf, (w, h), "RGB")
                 surf = pygame.transform.flip(surf, False, True)
-                path = f"screenshots/screenshot_{screenshot_count:04d}.png"
+                path = f"assets/images/screenshot_{screenshot_count:04d}.png"
                 pygame.image.save(surf, path)
 
             window.end_frame()
