@@ -60,9 +60,6 @@ class InputState:
     toggle_dssc: bool = False
     screenshot: bool = False
 
-    place_jammers: bool = False
-    jammer_count_up: bool = False
-    jammer_count_down: bool = False
     motor_keys: Set[str] = field(default_factory=set)
     arrow_keys: Set[str] = field(default_factory=set)
     mouse_delta: Tuple[float, float] = (0.0, 0.0)
@@ -112,12 +109,6 @@ class Window:
                     state.reset = True
                 elif event.key == pygame.K_p:
                     state.toggle_pause = True
-                elif event.key == pygame.K_j:
-                    state.place_jammers = True
-                elif event.key in (pygame.K_EQUALS, pygame.K_PLUS):
-                    state.jammer_count_up = True
-                elif event.key in (pygame.K_MINUS, pygame.K_UNDERSCORE):
-                    state.jammer_count_down = True
                 elif event.key == pygame.K_d:
                     state.toggle_dssc = True
                 elif event.key == pygame.K_k:
