@@ -10,6 +10,15 @@ computed, force/torque is integrated over a rigid body, and the resulting
 motion (translation, pitch, roll, yaw) is an emergent outcome of that
 physics.
 
+## Gallery
+
+| General view | Free camera |
+|---|---|
+| ![](assets/images/screenshot_0001.png) | ![](assets/images/screenshot_0002.png) |
+
+| Approaching jammer | Inside jammer range | Leaving jammer |
+|---|---|---|
+| ![](assets/images/screenshot_0003.png) | ![](assets/images/screenshot_0004.png) | ![](assets/images/screenshot_0005.png) |
 
 ## Installation
 
