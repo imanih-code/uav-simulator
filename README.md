@@ -108,6 +108,10 @@ operator, give it enough thrust.
 | `V`          | Toggle between FOLLOW (chases the UAV, GTA-style) and FREE (spectator, fully free) |
 | `BACKSPACE`  | Reset UAV + randomly reposition all jammers |
 | `P`          | Pause / unpause (camera keeps working while paused) |
+| `D`          | Toggle chaotic DSSS anti-jamming (N=8) on/off |
+| `K`          | Save screenshot to `assets/images/` |
+| `J`          | Place jammers at random positions |
+| `+` / `-`   | Increase / decrease number of jammers |
 | `ESC`        | Quit |
 
 When pressing `V` the camera doesn't "jump": it keeps the current viewpoint
