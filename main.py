@@ -23,6 +23,7 @@ radio links whenever the UAV's centre is inside their effect radius.
 """
 from __future__ import annotations
 
+import os
 import random
 import time
 from typing import List, Tuple
