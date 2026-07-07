@@ -142,11 +142,15 @@ directly — the `HUD` only talks to the `UAVOperator`.
   bytes/sec and, drawn as a real NRZ square wave, the actual signal the
   `CommGatewayOutput` encoded and transmitted bit by bit — not a decorative
   animation, these are the real bits of each message.
+- **Noise timeline** — real-time graph of uplink (TX) and downlink (RX) noise
+  voltage below the signal panels, updated every frame.
+- **DSSS correlation meter** — when anti-jamming is active (`D` key), a
+  horizontal bar shows per-burst correlation quality (green = good, red =
+  jammed) for both links, with a `DSSS:N` label above the minimap.
 - Per-motor throttle bars at the bottom, as before.
 
-All HUD text (letters, numbers, `%`, `:`, etc.) is drawn with a custom
-vector font (`rendering/vector_font.py`) made 100% of line segments — no
-textures or font files.
+All HUD text (letters, numbers, `%`, `:`, etc.) is drawn with a TrueType
+texture atlas (`rendering/ttf_font.py`) via a 7-segment TTF font.
 
 ## Communication: Real GNU Radio, not an in-memory queue
 
@@ -207,6 +211,7 @@ uavsim/
 │   ├── gnuradio_link.py   GnuRadioChannel: real radio link (GMSK +
 │   │                      noisy channel + demod + CRC), with its own
 │   │                      background thread
+│   ├── comm_chaos_adapter.py DSSSChaotic + Lorenz-based spread/despread
 │   └── gateway.py          CommGatewayInput/Output: wrap a
 │                            GnuRadioChannel: Output sees TX traffic
 │                            (transmitted), Input sees RX traffic (actually
@@ -235,7 +240,7 @@ uavsim/
     ├── window.py           Window + unified input (motors, arrows,
     │                       mouse, camera toggle, reset) via pygame
     ├── camera.py           Camera: FOLLOW (orbit) and FREE (spectator) modes
-    ├── vector_font.py      Vector font (GL_LINES only)
+    ├── ttf_font.py          TrueType texture atlas font renderer
     └── renderer.py         Draws terrain + UAV + full HUD
 ```
 
