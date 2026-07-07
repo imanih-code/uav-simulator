@@ -10,7 +10,7 @@ computed, force/torque is integrated over a rigid body, and the resulting
 motion (translation, pitch, roll, yaw) is an emergent outcome of that
 physics.
 
-https://github.com/user-attachments/assets/2f96a868-2eee-4c68-8c36-ee72826e4783
+<video src="https://github.com/imanih-code/uav-simulator/raw/main/assets/videos/UAVSIM.mp4" controls width="800"></video>
 
 ## Installation
 
