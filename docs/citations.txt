@@ -1,0 +1,26 @@
+@inproceedings{Nwachioma_2021,
+   title={FPGA prototyping of synchronized chaotic map for UAV secure communication},
+   url={http://dx.doi.org/10.1109/AERO50100.2021.9438428},
+   DOI={10.1109/aero50100.2021.9438428},
+   booktitle={2021 IEEE Aerospace Conference (50100)},
+   publisher={IEEE},
+   author={Nwachioma, Christian and Ezuma, Martins and Medaiyese, Olusiji. O.},
+   year={2021},
+   month=Mar, pages={1–7} 
+}
+
+
+
+@article{Souli2025,
+  author = {Souli, Nicolas and Stavrinides, Stavros G. and Picos, Rodrigo and Karatzia, Maria and Kolios, Panayiotis and Ellinas, Georgios},
+  title = {Development of a Lightweight Secure Communication System for UAVs Enhanced by an Unconventional Chaotic Communication Architecture},
+  journal = {Journal of Intelligent & Robotic Systems},
+  year = {2025},
+  volume = {111},
+  number = {3},
+  pages = {85},
+  doi = {10.1007/s10846-025-02293-6},
+  url = {https://doi.org/10.1007/s10846-025-02293-6},
+  issn = {1573-0409},
+  abstract = {Ensuring the confidentiality, integrity and authenticity of transmitted data for single- and multi-agent systems is becoming crucial to protect these systems against potential threats. This is precisely the focus of this work that introduces a novel approach for securing communications between unmanned aerial vehicles (UAVs). In particular, to safeguard the data against attacks in UAV networks, implemented for military-grade or critical infrastructure operation scenarios, different security techniques are combined, including the employment of a chaotic synchronization-based communications architecture. The proposed chaotic-synchronized, secure communications system (UAV-CSCS) is applied onboard a UAV and comprised of three layers, namely a VPN server (initial security layer), a custom ROS-based framework (data collection and distribution layer), and a lightweight chaotic communications module (secondary security layer). UAV-CSCS’s main component is a transmitter-receiver communication architecture based on chaotic synchronization that successfully encodes and decodes information over a chaotic signal, enabling secure information exchange between agents. To validate the effectiveness of the proposed system, a prototype is designed, developed, and thoroughly tested in real-world multi-UAV experiments. The results demonstrate secure, real-time communication with low-power consumption and minimal resource allocation (in terms of CPU and RAM), validating the system’s efficiency and applicability.}
+}

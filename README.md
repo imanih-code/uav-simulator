@@ -10,6 +10,8 @@ computed, force/torque is integrated over a rigid body, and the resulting
 motion (translation, pitch, roll, yaw) is an emergent outcome of that
 physics.
 
+https://github.com/user-attachments/assets/2f96a868-2eee-4c68-8c36-ee72826e4783
+
 ## Installation
 
 **1. GNU Radio** (not a pip package — install via your system package manager):
@@ -253,6 +255,22 @@ doesn't "go crazy" with it.
   keyboards or cameras; `HUD` never talks to the UAV, only to what the
   `Operator` has already received; `Camera` knows nothing about physics or
   comms.
+
+## References
+
+The chaotic DSSS anti-jamming scheme implemented here is based on the
+following papers (PDFs available in `docs/`):
+
+1. **Souli, N.**, Stavrinides, S. G., Picos, R., Karatzia, M., Kolios, P.,
+   & Ellinas, G. (2025). *Development of a Lightweight Secure Communication
+   System for UAVs Enhanced by an Unconventional Chaotic Communication
+   Architecture*. Journal of Intelligent & Robotic Systems, 111(3), 85.
+   [DOI: 10.1007/s10846-025-02293-6](https://doi.org/10.1007/s10846-025-02293-6)
+
+2. **Nwachioma, C.**, Ezuma, M., & Medaiyese, O. O. (2021). *FPGA
+   prototyping of synchronized chaotic map for UAV secure communication*.
+   2021 IEEE Aerospace Conference, 1–7.
+   [DOI: 10.1109/AERO50100.2021.9438428](https://doi.org/10.1109/AERO50100.2021.9438428)
 
 ## Next steps (not yet implemented)
 
