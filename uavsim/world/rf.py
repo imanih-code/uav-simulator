@@ -37,7 +37,7 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from uavsim.entities.jammer import Jammer
+from uavsim.entities.jammer import Jammer, JammerKind
 
 SPEED_OF_LIGHT = 299_792_458.0
 
@@ -65,11 +65,33 @@ class RFParams:
 @dataclass(frozen=True)
 class LinkBudget:
     uplink_signal_dbm: float
-    uplink_interference_dbm: float     # jammers only (-inf if none on)
-    uplink_sinr_db: float
+    uplink_interference_dbm: float     # all jammers that are on (-inf if none)
+    uplink_sinr_db: float              # signal / (noise + all interference)
     downlink_signal_dbm: float
     downlink_interference_dbm: float
     downlink_sinr_db: float
+    # Narrowband (TONE) part of the interference, kept apart because a radio
+    # that simulates the waveform can reject it by despreading.
+    uplink_tone_dbm: float = float("-inf")
+    downlink_tone_dbm: float = float("-inf")
+
+    def wideband_sinr_db(self, uplink: bool) -> float:
+        """SINR counting only noise + wideband jammers (tone excluded)."""
+        signal = self.uplink_signal_dbm if uplink else self.downlink_signal_dbm
+        tone = self.uplink_tone_dbm if uplink else self.downlink_tone_dbm
+        sinr = self.uplink_sinr_db if uplink else self.downlink_sinr_db
+        if math.isinf(tone):
+            return sinr
+        noise_plus_total = _dbm_to_mw(signal - sinr)
+        return float(signal - _mw_to_dbm(max(noise_plus_total - _dbm_to_mw(tone), 1e-30)))
+
+    def tone_amplitude(self, uplink: bool) -> float:
+        """CW jammer amplitude relative to a unit-amplitude signal."""
+        signal = self.uplink_signal_dbm if uplink else self.downlink_signal_dbm
+        tone = self.uplink_tone_dbm if uplink else self.downlink_tone_dbm
+        if math.isinf(tone):
+            return 0.0
+        return float(math.sqrt(2.0 * 10.0 ** ((tone - signal) / 10.0)))
 
 
 def path_loss_db(distance, height_a, height_b, params: RFParams):
@@ -87,12 +109,19 @@ def sinr_to_noise_voltage(sinr_db: float) -> float:
 
 
 def apply_to_links(budget: LinkBudget, uplink, downlink) -> None:
-    """Push the budget's SINRs into two radio channels (GNU Radio or loopback).
+    """Push the budget into two radio channels (GNU Radio or numpy).
 
-    Skips tiny changes so the GNU Radio worker queue is not flooded.
+    A channel that can simulate a tone (``tone_amplitude`` attribute) gets
+    the wideband noise and the tone separately; otherwise the tone is
+    folded into the noise. Tiny changes are skipped so the GNU Radio
+    worker queue is not flooded.
     """
-    for link, sinr in ((uplink, budget.uplink_sinr_db), (downlink, budget.downlink_sinr_db)):
-        nv = sinr_to_noise_voltage(sinr)
+    for link, up in ((uplink, True), (downlink, False)):
+        if hasattr(link, "tone_amplitude"):
+            nv = sinr_to_noise_voltage(budget.wideband_sinr_db(up))
+            link.tone_amplitude = budget.tone_amplitude(up)
+        else:
+            nv = sinr_to_noise_voltage(budget.uplink_sinr_db if up else budget.downlink_sinr_db)
         if abs(nv - link.noise_voltage) > 0.01 * max(nv, 1e-6):
             link.noise_voltage = nv
 
@@ -128,6 +157,7 @@ class RFEnvironment:
         down_signal = p.uav_tx_dbm + p.uav_gain_dbi + p.ground_station_gain_dbi - pl_link
 
         active = [j for j in jammers if j.is_on(t)]
+        tones = [j for j in active if j.kind is JammerKind.TONE]
         up_i = self._interference_mw(uav, p.uav_gain_dbi, active)
         down_i = self._interference_mw(gs, p.ground_station_gain_dbi, active)
         noise = _dbm_to_mw(p.noise_floor_dbm)
@@ -138,6 +168,9 @@ class RFEnvironment:
             downlink_signal_dbm=down_signal,
             downlink_interference_dbm=float(_mw_to_dbm(down_i)),
             downlink_sinr_db=float(down_signal - _mw_to_dbm(noise + down_i)),
+            uplink_tone_dbm=float(_mw_to_dbm(self._interference_mw(uav, p.uav_gain_dbi, tones))),
+            downlink_tone_dbm=float(_mw_to_dbm(
+                self._interference_mw(gs, p.ground_station_gain_dbi, tones))),
         )
 
     def _interference_mw(self, receiver: np.ndarray, rx_gain: float,

@@ -8,6 +8,11 @@ Besides the flight state, every packet carries what the *receiver* knows
 about the uplink: the sticks it is actually applying (which differ from
 the pilot's sticks during a failsafe), the uplink link quality it
 measured, the flight mode, and the failsafe stage/action.
+
+The packet is deliberately compact (56 bytes, was 174 with doubles):
+inside a jammer every extra bit is another chance for the CRC to fail, so
+values are sent as scaled integers at the resolution a ground station
+actually needs (cm/s, 0.006 deg, 0.4% throttle...).
 """
 from __future__ import annotations
 
@@ -17,12 +22,17 @@ from typing import Tuple
 
 import numpy as np
 
-# seq(H) + timestamp(d) + position(3d) + velocity(3d) + attitude_rpy(3d)
-# + angular_velocity(3d) + motor_command(4d) + battery(d) + mass(d) + health(d)
-# + applied sticks (4h: throttle*1000, roll/pitch/yaw*500)
-# + uplink LQ % (B) + flight mode (B) + failsafe stage<<4 | action (B) + flags (B)
-_STRUCT_FORMAT = "!H20d4h4B"
+# seq(H) + timestamp(f, s) + position(3f, m)
+# + velocity(3h, cm/s) + attitude(3h, 1e-4 rad) + angular velocity(3h, 1e-3 rad/s)
+# + motor commands(4B, /255) + battery(B, 0.5%) + health(B, 0.5%) + mass(H, g)
+# + applied sticks(4h: throttle*1000, roll/pitch/yaw*500)
+# + uplink LQ %(B) + flight mode(B) + failsafe stage<<4 | action(B) + flags(B)
+_STRUCT_FORMAT = "!Hf3f3h3h3h4BBBH4h4B"
 PACKET_SIZE = struct.calcsize(_STRUCT_FORMAT)
+
+_VEL_SCALE = 100.0
+_ATT_SCALE = 1e4
+_RATE_SCALE = 1e3
 
 FLAG_ARMED = 0x01
 FLAG_LANDED = 0x02
@@ -58,13 +68,13 @@ class TelemetryPacket:
             self.seq & 0xFFFF,
             self.timestamp,
             *self.position.tolist(),
-            *self.velocity.tolist(),
-            *self.attitude_rpy.tolist(),
-            *self.angular_velocity.tolist(),
-            *self.motor_throttle.tolist(),
-            self.battery_percent,
-            self.mass,
-            self.health_percent,
+            *_i16(self.velocity, _VEL_SCALE),
+            *_i16(self.attitude_rpy, _ATT_SCALE),
+            *_i16(self.angular_velocity, _RATE_SCALE),
+            *(int(round(_clamp(m, 0.0, 1.0) * 255)) for m in self.motor_throttle),
+            int(round(_clamp(self.battery_percent, 0.0, 100.0) * 2)),
+            int(round(_clamp(self.health_percent, 0.0, 100.0) * 2)),
+            int(round(_clamp(self.mass * 1000.0, 0.0, 65535.0))),
             int(round(_clamp(thr, 0.0, 1.0) * 1000)),
             int(round(_clamp(roll, -1.0, 1.0) * 500)),
             int(round(_clamp(pitch, -1.0, 1.0) * 500)),
@@ -80,21 +90,26 @@ class TelemetryPacket:
         if len(data) != PACKET_SIZE:
             raise ValueError(f"Expected {PACKET_SIZE} bytes, got {len(data)}")
         v = struct.unpack(_STRUCT_FORMAT, data)
-        seq = v[0]
-        d = v[1:21]
+        seq, timestamp = v[0], v[1]
+        position = np.array(v[2:5], dtype=float)
+        velocity = np.array(v[5:8], dtype=float) / _VEL_SCALE
+        attitude = np.array(v[8:11], dtype=float) / _ATT_SCALE
+        rates = np.array(v[11:14], dtype=float) / _RATE_SCALE
+        motors = np.array(v[14:18], dtype=float) / 255.0
+        battery, health, mass_g = v[18] / 2.0, v[19] / 2.0, v[20]
         thr, roll, pitch, yaw = v[21:25]
         lq, mode, fs, flags = v[25:29]
         return TelemetryPacket(
             seq=seq,
-            timestamp=d[0],
-            position=np.array(d[1:4]),
-            velocity=np.array(d[4:7]),
-            attitude_rpy=np.array(d[7:10]),
-            angular_velocity=np.array(d[10:13]),
-            motor_throttle=np.array(d[13:17]),
-            battery_percent=d[17],
-            mass=d[18],
-            health_percent=d[19],
+            timestamp=timestamp,
+            position=position,
+            velocity=velocity,
+            attitude_rpy=attitude,
+            angular_velocity=rates,
+            motor_throttle=motors,
+            battery_percent=battery,
+            mass=mass_g / 1000.0,
+            health_percent=health,
             applied_sticks=(thr / 1000.0, roll / 500.0, pitch / 500.0, yaw / 500.0),
             uplink_lq=float(lq),
             flight_mode=mode,
@@ -107,3 +122,7 @@ class TelemetryPacket:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _i16(values, scale: float):
+    return [int(round(_clamp(float(x) * scale, -32767.0, 32767.0))) for x in values]

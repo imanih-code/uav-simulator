@@ -7,17 +7,20 @@ the UAV for the uplink, the ground station for the downlink -- and adds
 it to the noise there. Whether that kills a link depends on geometry:
 the jammer's distance to the receiver *versus* the wanted transmitter's.
 
-Three temporal behaviours are modelled (all as in-band noise, since the
-radio channel is an AWGN channel):
+Kinds:
 
-* BARRAGE -- always on.
-* PULSED  -- on for ``duty`` of every ``period`` seconds.
+* BARRAGE -- wideband noise, always on.
+* PULSED  -- wideband noise, on for ``duty`` of every ``period`` seconds.
 * SWEPT   -- sweeps across a wide band and only sits on our channel for
              ``duty * period`` seconds once per sweep.
+* TONE    -- a continuous narrowband carrier (CW) right next to ours. The
+             numpy radio simulates it as an actual tone added to the chips,
+             so spreading with a good sequence can reject it; GNU Radio's
+             channel cannot, so there it is counted as extra noise.
 
-Their interaction with the failsafe timers is the interesting part: a
-jammer whose "on" bursts are shorter than the RX-loss timeout (0.1 s)
-degrades link quality without ever triggering a failsafe.
+The temporal ones interact with the failsafe timers: a jammer whose "on"
+bursts are shorter than the RX-loss timeout (0.1 s) degrades link quality
+without ever triggering a failsafe.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ class JammerKind(Enum):
     BARRAGE = "BARRAGE"
     PULSED = "PULSED"
     SWEPT = "SWEPT"
+    TONE = "TONE"
 
 
 # Default timing per kind: (period s, duty fraction)
@@ -39,6 +43,7 @@ _DEFAULT_TIMING = {
     JammerKind.BARRAGE: (1.0, 1.0),
     JammerKind.PULSED: (0.25, 0.3),
     JammerKind.SWEPT: (0.6, 0.12),
+    JammerKind.TONE: (1.0, 1.0),
 }
 
 

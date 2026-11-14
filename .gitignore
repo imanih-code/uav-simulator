@@ -25,3 +25,6 @@ Thumbs.db
 
 # Project specific
 *.log
+
+# Experiment output (docs/results/ holds the committed reference run)
+/results/

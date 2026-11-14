@@ -1,5 +1,26 @@
 Propuesta: DSSS Caótico para Resiliencia Anti-Jamming
 
+> **Nota (noviembre 2026): resultados medidos.** Esta propuesta se
+> implementó y luego se midió con el módem bit a bit
+> (`uavsim/comms/phy/`, resultados en [results/](results/README.md)).
+> Lo que se confirmó y lo que no:
+>
+> * Contra ruido de banda ancha el ensanchado da ~10·log10(N) dB, pero
+>   **cuesta N veces el tiempo en el aire**: es exactamente lo mismo que
+>   repetir cada bit N veces. Con N=8, +9 dB por ×8 de airtime.
+> * La secuencia de Lorenz tal como está (x del atractor, dt=0.01,
+>   umbral en la mediana) cambia de signo cada ~150 chips: con N=8 casi
+>   todos los bits se multiplican por una constante. Rinde 2–3 dB peor que
+>   una secuencia aleatoria con clave, y **frente a un jammer de tono no
+>   rechaza nada** (incluso queda algo peor que no ensanchar).
+> * La cabecera (palabra de acceso) sin ensanchar se convierte en el punto
+>   débil; ensancharla y desensanchar con decisiones suaves recupera la
+>   ganancia completa.
+> * La afirmación de "recuperación perfecta con N=256" no tiene en cuenta
+>   que la tasa de datos cae 256 veces; la corrección de errores (código
+>   convolucional K=7, 1/2) da ganancia real (+4–5 dB descontando el
+>   airtime) y combinada con N=4 es la mejor opción medida.
+
 ## Problema
 
 Hoy, los jammers elevan `noise_voltage` en `channels.channel_model()`. El AWGN corrompe la señal GMSK y los paquetes se pierden (fallo de sync o CRC). El UAV pierde comunicación completamente dentro del radio de un jammer.

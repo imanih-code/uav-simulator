@@ -101,6 +101,7 @@ JAMMER_KIND_COLORS = {
     JammerKind.BARRAGE: (1.0, 0.2, 0.1),   # red: always on
     JammerKind.PULSED: (1.0, 0.3, 0.85),   # magenta: on/off bursts
     JammerKind.SWEPT: (1.0, 0.65, 0.1),    # orange: sweeps through our channel
+    JammerKind.TONE: (0.7, 1.0, 0.2),      # lime: narrowband carrier
 }
 GROUND_STATION_COLOR = (0.85, 0.95, 1.0)
 HEATMAP_CELL = 5.0            # m
@@ -150,12 +151,18 @@ class Renderer:
         self._heatmap_cols = np.zeros((0, 4), dtype=np.float32)
         self._heatmap_cells = None  # (centres_xy, rgba) for the minimap
         self._heatmap_visible = False
+        self._margin = 0.0
         self._font = TTFFont("assets/fonts/7-segment.ttf", size=14)
         self._pause_font = TTFFont("assets/fonts/7-segment.ttf", size=28)
 
     def draw_scene(self, camera_eye: np.ndarray, camera_target: np.ndarray,
                    jammers: List[Jammer] = (), sim_time: float = 0.0,
-                   budget: LinkBudget = None, heatmap_rf: RFEnvironment = None) -> None:
+                   budget: LinkBudget = None, heatmap_rf: RFEnvironment = None,
+                   link_margin_db: float = 0.0) -> None:
+        """`link_margin_db`: how much lower SINR the active mitigation tolerates
+        (measured by uavsim.experiments.link_curves); shifts every colour
+        threshold so the map shows where *this* radio loses the link."""
+        self._margin = link_margin_db
         gluLookAt(
             camera_eye[0], camera_eye[1], camera_eye[2],
             camera_target[0], camera_target[1], camera_target[2],
@@ -177,7 +184,8 @@ class Renderer:
 
     def draw_hud(self, snapshot: HUDSnapshot, paused: bool = False,
                  jammers: List[Jammer] = (), budget: LinkBudget = None,
-                 dssc_N: int = 0, link_backend: str = "", gamepad: str = "") -> None:
+                 dssc_N: int = 0, link_backend: str = "", gamepad: str = "",
+                 phy_label: str = "") -> None:
         self._begin_hud_overlay()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
@@ -192,10 +200,12 @@ class Renderer:
         self._draw_sinr_timeline(budget)
         label_x = self.hud_width - MINIMAP_SIZE - MINIMAP_MARGIN
         label_y = MINIMAP_MARGIN + MINIMAP_SIZE + 6
-        if dssc_N > 0:
-            self._font.draw(f"DSSS:{dssc_N}", label_x, label_y, colour=(0.3, 0.8, 1.0))
+        if phy_label:
+            colour = (0.3, 0.8, 1.0) if phy_label != "NONE" else BANNER_INFO_COLOR
+            self._font.draw(f"PHY:{phy_label}", label_x, label_y, colour=colour)
         if self._heatmap_visible:
-            self._font.draw("MAP:WORST UP", label_x + 80, label_y, colour=(1.0, 0.75, 0.1))
+            self._font.draw("MAP:WORST UP", label_x, label_y + self._font._size + 6,
+                            colour=(1.0, 0.75, 0.1))
         self._draw_minimap(jammers)
         if paused:
             self._draw_pause_overlay(len(jammers))
@@ -240,7 +250,7 @@ class Renderer:
         ground (worst case: every jammer on). Transparent where the link is
         healthy, yellow -> red where it degrades / dies."""
         altitude = max(float(self.uav.body.position[2]), 2.0)
-        key = (round(altitude), tuple(id(j) for j in jammers))
+        key = (round(altitude), tuple(id(j) for j in jammers), round(self._margin, 1))
         if key != self._heatmap_key or t - self._heatmap_time > HEATMAP_REFRESH:
             self._rebuild_heatmap(rf, jammers, altitude)
             self._heatmap_key = key
@@ -268,9 +278,11 @@ class Renderer:
         ys = np.arange(-half + c / 2.0, half, c)
         sinr = rf.uplink_sinr_grid(xs, ys, altitude, self.world.ground_station, jammers)
         gx, gy = np.meshgrid(xs, ys)
-        mask = sinr < HEATMAP_GOOD_SINR
+        good = HEATMAP_GOOD_SINR - self._margin
+        dead = HEATMAP_DEAD_SINR - self._margin
+        mask = sinr < good
         sx, sy, sv = gx[mask], gy[mask], sinr[mask]
-        severity = np.clip((HEATMAP_GOOD_SINR - sv) / (HEATMAP_GOOD_SINR - HEATMAP_DEAD_SINR), 0, 1)
+        severity = np.clip((good - sv) / (good - dead), 0, 1)
         yellow = np.array([1.0, 0.85, 0.1])
         red = np.array([1.0, 0.1, 0.05])
         rgb = yellow + (red - yellow) * severity[:, None]
@@ -312,13 +324,13 @@ class Renderer:
         a = np.asarray(self.world.ground_station, dtype=float)
         b = self.uav.body.position
         sinr = budget.uplink_sinr_db
-        glColor3f(*_sinr_colour(sinr))
+        glColor3f(*_sinr_colour(sinr + self._margin))
         length = float(np.linalg.norm(b - a))
         if length < 1e-6:
             return
         direction = (b - a) / length
         glBegin(GL_LINES)
-        if sinr >= HEATMAP_DEAD_SINR:
+        if sinr + self._margin >= HEATMAP_DEAD_SINR:
             glVertex3f(*a)
             glVertex3f(*b)
         else:
@@ -954,8 +966,8 @@ class Renderer:
         # Dead-link threshold
         glColor3f(0.45, 0.12, 0.1)
         glBegin(GL_LINES)
-        glVertex2f(graph_left, to_y(HEATMAP_DEAD_SINR))
-        glVertex2f(graph_left + graph_width, to_y(HEATMAP_DEAD_SINR))
+        glVertex2f(graph_left, to_y(HEATMAP_DEAD_SINR - self._margin))
+        glVertex2f(graph_left + graph_width, to_y(HEATMAP_DEAD_SINR - self._margin))
         glEnd()
 
         up, down = hist[-1]

@@ -16,7 +16,8 @@ A gamepad, if connected, drives the sticks (A = arm, B = mode, Y = failsafe).
 Simulation
 ----------
 Arrow keys / mouse  camera;  V  FOLLOW / FREE camera
-F              chaotic DSSS anti-jamming (N=8) on/off
+F              cycle radio mitigation: NONE -> DSSS8 LORENZ -> DSSS8 KEYED -> FEC
+               -> DSSS4+FEC (GNU Radio backend: Lorenz DSSS N=8 on/off)
 H              uplink interference map on the ground on/off
 P              pause;  BACKSPACE  reset UAV + reposition jammers
 F12            screenshot;  ESC  quit
@@ -37,6 +38,7 @@ import pygame
 from OpenGL.GL import GL_BACK, GL_RGB, GL_UNSIGNED_BYTE, glReadPixels, glReadBuffer
 
 from uavsim.comms.gateway import CommGatewayInput, CommGatewayOutput
+from uavsim.comms.phy.modem import PROFILE_ORDER, PROFILES
 from uavsim.entities.jammer import Jammer, JammerKind
 from uavsim.entities.operator import PilotInput, UAVOperator
 from uavsim.entities.uav import UAV, UAVConfig
@@ -58,7 +60,9 @@ _JAMMER_MIN_SEPARATION = 60.0           # m
 # Radiated power drawn per jammer (4-25 mW). With the 500 mW ground station
 # this leaves danger zones around each jammer instead of jamming everything.
 _JAMMER_POWER_RANGE_DBM = (6.0, 14.0)
-_JAMMER_KIND_WEIGHTS = {JammerKind.BARRAGE: 3, JammerKind.PULSED: 2, JammerKind.SWEPT: 2}
+_JAMMER_KIND_WEIGHTS = {
+    JammerKind.BARRAGE: 3, JammerKind.PULSED: 2, JammerKind.SWEPT: 2, JammerKind.TONE: 2,
+}
 
 
 def make_link(backend: str, noise: float):
@@ -110,6 +114,30 @@ def update_radio(rf: RFEnvironment, world: World, jammers: List[Jammer], uav: UA
     budget = rf.evaluate(uav.body.position, world.ground_station, jammers, sim_time)
     apply_to_links(budget, command_link, telemetry_link)
     return budget
+
+
+def cycle_mitigation(command_link, telemetry_link) -> None:
+    """F key. Numpy radio: step through every mitigation profile. GNU Radio:
+    toggle its (Lorenz) DSSS N=8, the only scheme implemented there."""
+    for link in (command_link, telemetry_link):
+        link.clear(link.noise_voltage)
+        if hasattr(link, "profile"):
+            order = list(PROFILE_ORDER)
+            link.profile = order[(order.index(link.profile) + 1) % len(order)]
+        else:
+            link.dssc_N = 0 if link.dssc_N > 0 else 8
+
+
+def mitigation_label(link) -> str:
+    if hasattr(link, "profile_label"):
+        return link.profile_label
+    return f"DSSS{link.dssc_N} LORENZ" if link.dssc_N > 0 else "NONE"
+
+
+def mitigation_gain_db(link) -> float:
+    if hasattr(link, "profile"):
+        return PROFILES[link.profile].measured_gain_db
+    return PROFILES["dsss-lorenz"].measured_gain_db if link.dssc_N > 0 else 0.0
 
 
 def place_random_jammers(jammers: List[Jammer], count: int, extent_half: float,
@@ -202,10 +230,7 @@ def main() -> None:
             if input_state.toggle_heatmap:
                 show_heatmap = not show_heatmap
             if input_state.toggle_dssc:
-                new_n = 0 if command_link.dssc_N > 0 else 8
-                for link in (command_link, telemetry_link):
-                    link.clear(link.noise_voltage)
-                    link.dssc_N = new_n
+                cycle_mitigation(command_link, telemetry_link)
 
             worker_error = ""
             if not command_link.worker_alive:
@@ -250,10 +275,12 @@ def main() -> None:
             window.begin_frame()
             eye, target = camera.eye_and_target(uav.body.position)
             renderer.draw_scene(eye, target, jammers, sim_time, budget,
-                                heatmap_rf=rf if show_heatmap else None)
+                                heatmap_rf=rf if show_heatmap else None,
+                                link_margin_db=mitigation_gain_db(command_link))
             renderer.draw_hud(snapshot, paused, jammers, budget,
                               dssc_N=command_link.dssc_N, link_backend=backend,
-                              gamepad=window.gamepad_name)
+                              gamepad=window.gamepad_name,
+                              phy_label=mitigation_label(command_link))
             if input_state.screenshot:
                 screenshot_count += 1
                 save_screenshot(window, screenshot_count)

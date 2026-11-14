@@ -65,9 +65,17 @@ def test_telemetry_roundtrip():
         armed=True,
         landed=False,
     )
-    decoded = TelemetryPacket.decode(packet.encode())
+    raw = packet.encode()
+    assert len(raw) == 56
+    decoded = TelemetryPacket.decode(raw)
     assert decoded.seq == 4242
-    np.testing.assert_allclose(decoded.position, packet.position)
+    np.testing.assert_allclose(decoded.position, packet.position, atol=1e-5)
+    np.testing.assert_allclose(decoded.velocity, packet.velocity, atol=0.005)
+    np.testing.assert_allclose(decoded.attitude_rpy, packet.attitude_rpy, atol=1e-4)
+    np.testing.assert_allclose(decoded.angular_velocity, packet.angular_velocity, atol=1e-3)
+    np.testing.assert_allclose(decoded.motor_throttle, packet.motor_throttle, atol=0.002)
+    assert decoded.battery_percent == 88.0 and decoded.health_percent == 75.0
+    assert decoded.mass == 1.0
     assert decoded.applied_sticks == packet.applied_sticks
     assert decoded.uplink_lq == 96.0
     assert decoded.failsafe_stage == 3 and decoded.failsafe_action == int(FailsafeAction.LAND)

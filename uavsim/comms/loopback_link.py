@@ -1,19 +1,18 @@
-"""Fast, approximate stand-in for `GnuRadioChannel` (pure numpy).
+"""Fast numpy stand-in for `GnuRadioChannel`, with selectable mitigation.
 
 GNU Radio is the reference physical layer of this simulator, but it is
 hard to install on Windows and too slow for batch experiments. This
-backend keeps the *same interface and the same frame structure* and
-replaces the DSP with a statistical model:
+backend keeps the *same interface and frame structure* and runs every
+packet through the bit-true modem in `uavsim.comms.phy.modem`: real ±1
+chips, real Gaussian noise, an optional CW tone jammer, sync-word check,
+despreading, Viterbi and CRC.
 
-* A chip/bit error probability derived from ``noise_voltage`` with a
-  BPSK-like curve, ``p = 0.5 * erfc(sqrt(K) / noise_voltage)``. ``K`` is
-  calibrated so that a jammer centre (noise 0.71) gives ~10% chip errors,
-  where the real GMSK link stops working. It is an approximation, not a
-  replacement for GNU Radio results.
-* The 32-bit access code must match with at most 4 bit errors. Like the
-  real implementation, the header is *not* spread by DSSS.
-* Payload + CRC32 must arrive with zero bit errors. With DSSS enabled
-  each bit is a majority vote over N hard chips.
+The noise level is calibrated (implementation-loss factor K = 0.41) so
+that with no mitigation it reproduces where the GMSK link stops working
+(~10% chip errors at noise voltage 0.71). The closed-form functions
+below are that same calibration, kept for quick estimates and tests.
+
+Mitigation profiles (``profile``): see `uavsim.comms.phy.modem.PROFILES`.
 
 Use it with ``python main.py --link loopback``.
 """
@@ -27,15 +26,16 @@ from typing import Deque, Optional, Tuple
 import numpy as np
 
 from uavsim.comms.link_stats import LinkStatsMixin
+from uavsim.comms.phy.modem import IMPLEMENTATION_LOSS_K, PROFILES, NumpyPhy, PhyProfile
 
 ACCESS_CODE_BITS = 32
 ACCESS_CODE_THRESHOLD = 4
 CRC_BITS = 32
-CHIP_ERROR_SCALE = 0.41     # K in p = 0.5*erfc(sqrt(K)/noise_voltage)
-DELIVERY_LATENCY = 0.012    # s, roughly one GNU Radio burst
-_SAMPLES_PER_SYMBOL = 4
+CHIP_ERROR_SCALE = IMPLEMENTATION_LOSS_K   # K in p = 0.5*erfc(sqrt(K)/noise_voltage)
+DELIVERY_LATENCY = 0.012                   # s, roughly one GNU Radio burst
 
 
+# -- closed-form calibration (no mitigation, hard decisions) ---------------
 def chip_error_probability(noise_voltage: float) -> float:
     if noise_voltage <= 1e-9:
         return 0.0
@@ -68,6 +68,7 @@ def packet_success_probability(payload_len: int, noise_voltage: float, dssc_n: i
     return header_success_probability(p) * (1.0 - bit_error) ** data_bits
 
 
+# -- channel -----------------------------------------------------------------
 class LoopbackChannel(LinkStatsMixin):
     def __init__(
         self,
@@ -76,16 +77,19 @@ class LoopbackChannel(LinkStatsMixin):
         dssc_N: int = 0,
         seed: Optional[int] = None,
         latency: float = DELIVERY_LATENCY,
+        profile: str = "none",
     ) -> None:
         self._init_stats(signal_history_seconds)
         self._noise_voltage = noise_voltage
-        self._dssc_N = dssc_N
+        self._tone_amplitude = 0.0
         self._latency = latency
         self._rng = np.random.default_rng(seed)
         self._pending: Deque[Tuple[float, Optional[bytes], np.ndarray, float]] = deque()
         self._rx_queue: Deque[bytes] = deque()
         self._last_correlation = 0.0
         self._worker_crashed_info = ""
+        self._seq = 0
+        self.profile = "dsss-lorenz" if dssc_N > 0 and profile == "none" else profile
 
     # -- same surface as GnuRadioChannel ---------------------------------
     @property
@@ -101,12 +105,34 @@ class LoopbackChannel(LinkStatsMixin):
         self._noise_voltage = value
 
     @property
+    def tone_amplitude(self) -> float:
+        """CW jammer amplitude relative to the signal (GNU Radio has no equivalent)."""
+        return self._tone_amplitude
+
+    @tone_amplitude.setter
+    def tone_amplitude(self, value: float) -> None:
+        self._tone_amplitude = value
+
+    @property
+    def profile(self) -> str:
+        return self._profile.name
+
+    @profile.setter
+    def profile(self, name: str) -> None:
+        self._profile: PhyProfile = PROFILES[name]
+        self._phy = NumpyPhy(self._profile, self._rng)
+
+    @property
+    def profile_label(self) -> str:
+        return self._profile.label
+
+    @property
     def dssc_N(self) -> int:
-        return self._dssc_N
+        return self._profile.dsss_n
 
     @dssc_N.setter
     def dssc_N(self, value: int) -> None:
-        self._dssc_N = value
+        self.profile = "dsss-lorenz" if value > 0 else "none"
 
     @property
     def last_correlation(self) -> float:
@@ -116,16 +142,10 @@ class LoopbackChannel(LinkStatsMixin):
         now = time.monotonic()
         self._tx_log.append((now, payload))
         self._prune(self._tx_log, now)
-
-        nv = self._noise_voltage
-        p = chip_error_probability(nv)
-        ok = self._rng.random() < packet_success_probability(len(payload), nv, self._dssc_N)
-        if self._dssc_N > 0:
-            correlation = max(0.0, 1.0 - 2.0 * p)
-        else:
-            correlation = 1.0 if ok else 0.0
-        raw = self._synth_waveform(payload, nv)
-        self._pending.append((now + self._latency, payload if ok else None, raw, correlation))
+        result = self._phy.burst(payload, self._seq, self._noise_voltage, self._tone_amplitude)
+        self._seq = (self._seq + 1) & 0xFFFFFFFF
+        self._pending.append((now + self._latency, result.payload, result.preview,
+                              result.correlation))
 
     def _receive(self) -> Optional[bytes]:
         self._drain()
@@ -149,14 +169,3 @@ class LoopbackChannel(LinkStatsMixin):
                 self._rx_log.append((t, payload))
                 self._prune(self._rx_log, t)
                 self._rx_queue.append(payload)
-
-    def _synth_waveform(self, payload: bytes, noise_voltage: float) -> np.ndarray:
-        """Short smoothed-NRZ waveform of the first symbols, for the HUD scope."""
-        n_symbols = self._dssc_N if self._dssc_N > 0 else 8
-        bits = np.unpackbits(np.frombuffer(payload[:1] or b"\x00", dtype=np.uint8))
-        symbols = np.resize(bits, n_symbols).astype(float) * 2.0 - 1.0
-        wave = np.repeat(symbols, _SAMPLES_PER_SYMBOL)
-        wave = np.convolve(wave, np.ones(3) / 3.0, mode="same")
-        wave = wave + noise_voltage * self._rng.standard_normal(wave.size)
-        peak = float(np.max(np.abs(wave))) or 1.0
-        return wave / peak

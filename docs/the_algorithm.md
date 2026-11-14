@@ -104,12 +104,43 @@ our channel for 12% of 0.6 s (72 ms). Bursts shorter than the 0.1 s
 RX-loss timeout lower LQ without starting a failsafe.
 
 Calibration against the link model (11-byte RC frame): ~90% delivered at
-11 dB SINR, ~50% at 9 dB, ~10% at 7 dB. The 174-byte telemetry packet
-needs ~1.5 dB more for the same delivery rate.
+11 dB SINR, ~50% at 9 dB, ~10% at 7 dB (no mitigation).
 
-Not modelled yet: fading/shadowing, terrain blockage, narrowband or
-reactive jammers (they need the channel itself to change, not just its
-noise level), antenna patterns.
+TONE jammers are accounted separately (`uplink_tone_dbm`): the numpy
+radio receives the wideband SINR as noise plus an actual CW tone of
+amplitude `sqrt(2·P_tone/P_signal)`; GNU Radio gets the tone folded into
+the noise.
+
+Not modelled yet: fading/shadowing, terrain blockage, reactive jammers,
+antenna patterns.
+
+## Numpy Modem and Mitigation Profiles
+
+**Files**: `uavsim/comms/phy/` (`modem.py`, `sequences.py`, `fec.py`)
+
+```
+payload + CRC32 -> [conv. code K=7 r=1/2] -> ±1 -> [× N chips] -> + sync word [× N chips]
+r[n] = s[n] + σ·w[n] + A·cos(2π·f·n + φ),   σ = noise_voltage / sqrt(2·0.41)
+sync check (≤ 4 errors) -> despread (soft Σ r·c / hard majority) -> [soft Viterbi] -> CRC32
+```
+
+| Profile | N | Chips | Despread | Sync word | FEC | Airtime (11 B) |
+|---|---|---|---|---|---|---|
+| NONE | – | – | – | plain | – | ×1 |
+| DSSS8 LORENZ | 8 | Lorenz x, median-thresholded | hard | plain | – | ×6.5 |
+| DSSS8 KEYED | 8 | Philox(key, packet seq) | soft | spread | – | ×8 |
+| FEC R1/2 | – | – | – | plain | K=7 | ×1.9 |
+| DSSS4+FEC | 4 | Philox(key, packet seq) | soft | spread | K=7 | ×7.5 |
+
+`DSSS8 LORENZ` reproduces what the GNU Radio backend does. Measured
+results: [docs/results/](results/).
+
+Model caveat: noise is fixed *per chip*, i.e. a jammer that keeps the same
+power spectral density over whatever bandwidth we occupy. Against such a
+jammer spreading by N buys exactly 10·log10(N) dB by spending N× airtime,
+the same as repeating each bit N times. Real spread spectrum also forces a
+fixed-power jammer to dilute its power over a wider band; that advantage
+is not credited here, so the numbers are conservative for DSSS.
 
 ## GNU Radio in Isolated Subprocess
 
@@ -132,20 +163,25 @@ Main process:              GNU Radio subprocess:
 
 **File**: `uavsim/comms/telemetry.py`
 
-The UAV sends a 174-byte packet every 0.1 s (`"!H20d4h4B"`):
+The UAV sends a 56-byte packet every 0.1 s (`"!Hf3f3h3h3h4BBBH4h4B"`):
 
-| Field | Type |
+| Field | Encoding |
 |---|---|
 | seq | uint16 |
-| timestamp (sim time) | double |
-| position, velocity, attitude_rpy, angular_velocity | 4 × 3 doubles |
-| motor commands | 4 doubles |
-| battery, mass, health | 3 doubles |
-| applied sticks (what the FC is acting on) | 4 int16 |
+| timestamp (sim time) | float32, s |
+| position | 3 × float32, m |
+| velocity | 3 × int16, cm/s |
+| attitude roll/pitch/yaw | 3 × int16, 1e-4 rad |
+| angular velocity | 3 × int16, 1e-3 rad/s |
+| motor commands | 4 × uint8, /255 |
+| battery, health | 2 × uint8, 0.5 % steps |
+| mass | uint16, g |
+| applied sticks (what the FC is acting on) | 4 × int16 |
 | uplink LQ %, flight mode, failsafe stage/action, flags (armed, landed) | 4 bytes |
 
-The doubles make it ~16× bigger than an RC frame, which is why telemetry
-is the first thing to die inside a jammer. Compacting it is planned.
+It used to be 174 bytes of doubles. Every bit is another chance for the
+CRC to fail inside a jammer, so the compact format buys ~1 dB of downlink
+margin at no cost in useful resolution.
 
 ## ChaoticLayer — Lorenz Attractor (Secret Bridge)
 

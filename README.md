@@ -79,13 +79,25 @@ system Python instead, or create the venv with `--system-site-packages`).
 
 ```bash
 python main.py                 # GNU Radio if installed, numpy link otherwise
-python main.py --link loopback # force the fast approximate numpy radio
+python main.py --link loopback # force the numpy radio
 ```
 
 `--link loopback` needs only `numpy scipy pygame PyOpenGL` and runs on
-Windows. It keeps the same frame structure (unspread 32-bit sync word,
-CRC32, optional DSSS) but replaces the DSP with a calibrated bit-error
-model, so use GNU Radio for results you want to report.
+Windows. It is a **bit-true baseband modem**: every chip of every packet
+is generated, hit by Gaussian noise (and by a CW tone if a TONE jammer is
+in range), then synchronised, despread, Viterbi-decoded and CRC-checked.
+Its noise level is calibrated to where the GNU Radio GMSK link stops
+working, and it is the only backend with the full set of mitigation
+profiles (`F`). It is still a model of a GMSK radio, not GNU Radio itself.
+
+Experiments (headless, minutes on a laptop; `matplotlib` optional for plots):
+
+```bash
+python -m uavsim.experiments.link_curves --out results      # delivery vs SINR / tone SIR
+python -m uavsim.experiments.jammer_approach --out results  # how close each profile gets
+```
+
+Results from these runs are in [docs/results/](docs/results/).
 
 Tests (headless, no GNU Radio or display needed):
 
@@ -151,7 +163,7 @@ ideal GNSS); GNSS jamming is not modelled yet.
 | Arrow keys   | FREE mode: move the camera. FOLLOW mode: orbit / zoom |
 | Mouse        | Rotate view (orbit in FOLLOW, look around in FREE) |
 | `V`          | Toggle between FOLLOW (chases the UAV) and FREE (spectator) |
-| `F`          | Toggle chaotic DSSS anti-jamming (N=8) on/off |
+| `F`          | Cycle radio mitigation: `NONE` → `DSSS8 LORENZ` → `DSSS8 KEYED` → `FEC R1/2` → `DSSS4+FEC` (GNU Radio: Lorenz DSSS on/off) |
 | `H`          | Toggle the uplink interference map painted on the ground |
 | `P`          | Pause / unpause (camera keeps working while paused) |
 | `BACKSPACE`  | Reset UAV + randomly reposition all jammers |
@@ -185,7 +197,8 @@ grey and freeze (`TLM LOST`), just like a real ground station.
   In the 3D view the home point is a cyan `H` and a dashed drop line marks
   the UAV's position over the ground.
 - **TX / RX scopes, DSSS correlation meter** — the real bits and waveform
-  of each burst, and DSSS correlation quality when anti-jamming is on (`F`).
+  of each burst, and DSSS correlation quality when spreading is on. The
+  active mitigation profile is shown above the minimap (`PHY:`).
 - **SINR timeline** (simulation instrument, not part of the OSD) — uplink
   and downlink SINR in dB over time, with the 7 dB "link dead" line.
 
@@ -223,6 +236,7 @@ link model, RC frames get through ~90% of the time at 11 dB SINR and
 | BARRAGE | red | always on | sustained loss → RTH/HOLD/LAND/DROP |
 | PULSED | magenta | on 30% of every 0.25 s | LQ drops to ~70%, bursts (75 ms) shorter than the 100 ms RX-loss timeout |
 | SWEPT | orange | crosses our channel for 72 ms every 0.6 s | small LQ dips, never a failsafe on its own |
+| TONE | lime | continuous narrowband carrier next to ours | like BARRAGE without mitigation; good spreading rejects it (numpy radio only — GNU Radio counts it as noise) |
 
 **Interference map** (`H`): the ground and minimap are painted with the
 uplink SINR a UAV would get at its *current altitude* if every jammer were
@@ -263,12 +277,11 @@ Real consequences, not cosmetic:
 - **Delivery is asynchronous with real jitter**: each burst (encode +
   modulate + pass through the channel + demodulate) costs ~10ms of real CPU
   time, so it runs in a background process per channel, never blocking the
-  main loop. RC frames (11 bytes) go out at 50 Hz and telemetry (174 bytes)
+  main loop. RC frames (11 bytes) go out at 50 Hz and telemetry (56 bytes)
   at 10 Hz, below the measured ~100 bursts/sec per worker ceiling.
-- **Longer packets die first**: at the same noise level the 174-byte
-  telemetry packet is far more likely to fail its CRC than the 11-byte RC
-  frame, so inside a jammer you often keep some control but lose the
-  telemetry (`LQ UP` stays up while `LQ DN` drops).
+- **Longer packets die first**: at the same noise level the 56-byte
+  telemetry packet is more likely to fail its CRC than the 11-byte RC
+  frame (it was 174 bytes of doubles before being compacted).
 
 ## Architecture
 
@@ -283,7 +296,11 @@ uavsim/
 │   ├── telemetry.py       TelemetryPacket: state + applied sticks + uplink LQ + failsafe
 │   ├── gnuradio_link.py   GnuRadioChannel: real GMSK + noisy channel + demod + CRC,
 │   │                      in its own subprocess
-│   ├── loopback_link.py   LoopbackChannel: same interface, statistical numpy model
+│   ├── loopback_link.py   LoopbackChannel: same interface, runs the numpy modem
+│   ├── phy/
+│   │   ├── modem.py       Bit-true modem + mitigation profiles (DSSS, FEC, header spreading)
+│   │   ├── sequences.py   Lorenz chips (legacy) and keyed Philox chips per packet
+│   │   └── fec.py         K=7 rate-1/2 convolutional code + soft Viterbi
 │   ├── link_stats.py      TX/RX history + bandwidth shared by both backends
 │   ├── comm_chaos_adapter.py DSSSChaotic + Lorenz-based spread/despread
 │   └── gateway.py         CommGatewayInput/Output wrappers around a channel
@@ -308,7 +325,8 @@ uavsim/
     ├── camera.py          Camera: FOLLOW (orbit) and FREE (spectator) modes
     ├── ttf_font.py        TrueType texture atlas font renderer
     └── renderer.py        Terrain, interference map, UAV, jammers, ground station, HUD
-tests/                     pytest: protocol, flight modes, failsafe, link model, RF model
+uavsim/experiments/        harness (headless Sim), link_curves, jammer_approach
+tests/                     pytest: protocol, flight modes, failsafe, RF model, modem
 ```
 
 Physics and control run at a **fixed 250 Hz in simulation time**
@@ -361,12 +379,10 @@ following papers (PDFs available in `docs/`):
 
 ## Next steps (not yet implemented)
 
-- Narrowband (tone) and reactive jammers — they need the radio channel
-  itself to change, not just its noise level — and GNSS jamming/spoofing.
+- Reactive jammers and GNSS jamming/spoofing.
 - Fading / shadowing, and terrain that blocks line of sight.
-- Better mitigation: spread the sync word, soft-decision despreading,
-  per-packet keyed sequences, FEC + interleaving, compact telemetry,
-  adaptive spreading, frequency hopping.
-- Headless batch runs that output link-quality curves vs J/S.
+- Port the keyed sequences, header spreading and FEC to the GNU Radio
+  backend; interleaving against pulses shorter than a packet; adaptive
+  spreading factor driven by LQ; frequency hopping.
 - Non-flat terrain.
 - More realistic ground contact (real normal force instead of clamping).
