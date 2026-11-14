@@ -28,16 +28,13 @@ class RigidBody:
     orientation: Rotation = field(default_factory=Rotation.identity)
     angular_velocity_body: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
-    # Passive aerodynamic drag -- a real airframe moving or spinning
-    # through air resists that motion. This is not flight control (it
-    # never pushes the UAV toward any target attitude), it only opposes
-    # whatever velocity/spin already exists, same as air resistance on any
-    # real object. Without it, any tiny, transient thrust imbalance
-    # between motors (which is now expected, since commands travel over a
-    # real, jittery radio link instead of always updating every motor in
-    # perfect lockstep) would accumulate into an unbounded tumble.
-    linear_drag_coefficient: float = 0.05
-    angular_drag_coefficient: float = 0.12
+    # Passive aerodynamic drag: air resists existing velocity and spin.
+    # Linear term ~ skin/induced drag at low speed, quadratic term ~
+    # 0.5 * rho * Cd * A for a small multirotor. Attitude stability comes
+    # from the flight controller, not from drag, so angular drag is small.
+    linear_drag_coefficient: float = 0.10     # N per (m/s)
+    quadratic_drag_coefficient: float = 0.03  # N per (m/s)^2
+    angular_drag_coefficient: float = 0.002   # N*m per (rad/s)
 
     def apply_body_forces(
         self,
@@ -70,7 +67,10 @@ class RigidBody:
     def _integrate_linear_motion(self, dt: float, net_force_body: np.ndarray) -> None:
         net_force_world = self.orientation.apply(net_force_body)
         net_force_world = net_force_world + self.mass * GRAVITY
-        drag_force_world = -self.linear_drag_coefficient * self.velocity
+        speed = float(np.linalg.norm(self.velocity))
+        drag_force_world = -(
+            self.linear_drag_coefficient + self.quadratic_drag_coefficient * speed
+        ) * self.velocity
         linear_acceleration = (net_force_world + drag_force_world) / self.mass
 
         self.velocity = self.velocity + linear_acceleration * dt

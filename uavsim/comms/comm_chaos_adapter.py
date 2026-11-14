@@ -141,10 +141,24 @@ class ChaoticLayer:
         return self._state.copy()
 
     def generate(self, length: int) -> np.ndarray:
+        """Integrate `length` Euler steps and return the x component.
+
+        Same arithmetic as calling `step()` repeatedly (bit-identical
+        output), but on plain Python floats: ~10x faster, which matters
+        now that RC frames go out at 50 Hz with DSSS enabled.
+        """
+        sigma, rho, beta, h = self._sigma, self._rho, self._beta, self._dt
+        x, y, z = (float(v) for v in self._state)
         out = np.empty(length, dtype=np.float64)
         for i in range(length):
-            self.step()
-            out[i] = self._state[0]
+            dx = sigma * (y - x)
+            dy = x * (rho - z) - y
+            dz = x * y - beta * z
+            x = x + h * dx
+            y = y + h * dy
+            z = z + h * dz
+            out[i] = x
+        self._state[:] = (x, y, z)
         return out
 
     def reset(self, x0: float = 1.0, y0: float = 1.0, z0: float = 1.0) -> None:

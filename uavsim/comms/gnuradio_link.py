@@ -36,12 +36,12 @@ import queue
 import random
 import time
 import zlib
-from collections import deque
-from typing import Deque, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
 from uavsim.comms.comm_chaos_adapter import ChaoticLayer, DSSSChaotic, SpreadingSequence
+from uavsim.comms.link_stats import LinkStatsMixin
 
 os.environ.pop("GR_SCHEDULER", None)  # only TPB exists in GR 3.10 — suppress spurious warning
 import traceback
@@ -251,7 +251,7 @@ def _worker_process(
         result_queue.put((recovered, serialised, time.monotonic(), corr_quality))
 
 
-class GnuRadioChannel:
+class GnuRadioChannel(LinkStatsMixin):
     """One real, simulated RF link. Transmissions go in on `_transmit`;
     whatever survives the channel comes out through `_receive`.
 
@@ -270,13 +270,9 @@ class GnuRadioChannel:
         max_pending: int = 256,
         dssc_N: int = 0,
     ) -> None:
-        self._signal_history_seconds = signal_history_seconds
+        self._init_stats(signal_history_seconds)
         self._noise_voltage = noise_voltage
         self._dssc_N = dssc_N
-
-        self._tx_log: Deque[Tuple[float, bytes]] = deque()
-        self._rx_log: Deque[Tuple[float, bytes]] = deque()
-        self._rx_raw_log: Deque[Tuple[float, np.ndarray]] = deque()
 
         self._rx_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=max_pending)
         self._worker_crashed: bool = False
@@ -401,9 +397,7 @@ class GnuRadioChannel:
 
     # -- reset / clear ---------------------------------------------------------
     def clear(self, reset_noise: float = 0.0) -> None:
-        self._tx_log.clear()
-        self._rx_log.clear()
-        self._rx_raw_log.clear()
+        self._clear_stats()
         self._discard_all()
         # Reset noise to a clean level so the worker doesn't carry stale
         # high noise from a previous jammer encounter.
@@ -437,41 +431,3 @@ class GnuRadioChannel:
                 self._rx_queue.get_nowait()
             except queue.Empty:
                 break
-
-    # -- stats used by the HUD -------------------------------------------------
-    def _prune(self, log: Deque[Tuple[float, bytes]], now: float) -> None:
-        cutoff = now - self._signal_history_seconds
-        while log and log[0][0] < cutoff:
-            log.popleft()
-
-    def tx_bandwidth_bps(self, window: float = 1.0) -> float:
-        return self._bandwidth(self._tx_log, window)
-
-    def rx_bandwidth_bps(self, window: float = 1.0) -> float:
-        return self._bandwidth(self._rx_log, window)
-
-    def rx_raw_transmissions(self, window: Optional[float] = None) -> List[Tuple[float, np.ndarray]]:
-        return self._recent(self._rx_raw_log, window)
-
-    def _bandwidth(self, log: Deque[Tuple[float, bytes]], window: float) -> float:
-        now = time.monotonic()
-        self._prune(log, now)
-        cutoff = now - window
-        total_bytes = sum(len(payload) for t, payload in log if t >= cutoff)
-        return total_bytes / window if window > 0 else 0.0
-
-    def tx_transmissions(self, window: Optional[float] = None) -> List[Tuple[float, bytes]]:
-        return self._recent(self._tx_log, window)
-
-    def rx_transmissions(self, window: Optional[float] = None) -> List[Tuple[float, bytes]]:
-        return self._recent(self._rx_log, window)
-
-    def _recent(
-        self, log: Deque[Tuple[float, bytes]], window: Optional[float]
-    ) -> List[Tuple[float, bytes]]:
-        now = time.monotonic()
-        self._prune(log, now)
-        if window is None:
-            return list(log)
-        cutoff = now - window
-        return [(t, p) for t, p in log if t >= cutoff]

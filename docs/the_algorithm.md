@@ -3,45 +3,81 @@
 ## General Architecture
 
 ```
-Operator ──(command)──> GnuRadioChannel ──(raw signal)──> UAV
-                              │                            │
-                              │                    (processes command)
-                              │                            │
-                              v                            v
-                        CommChaosAdapter            TelemetryPacket
-                         (correlation)           (includes command_log)
-                              │                            │
-                              └────────── HUD ─────────────┘
-                                           │
-                                      SENT vs RCVD
+pilot (keyboard / gamepad)
+   │ sticks + switches
+   v
+UAVOperator ──RC frame 50 Hz──> radio link ──> UAV
+                                (GNU Radio      │ LinkMonitor (LQ, time since last frame)
+                                 or numpy)      │ arming logic
+                                                │ Failsafe (stages, HOLD/LAND/RTH/DROP)
+                                                │ FlightController (cascade + mixer)
+                                                │ Motors (spin-up lag, thrust ∝ speed²)
+                                                v RigidBody (6DOF) + ground contact
+HUD <── UAVOperator <──telemetry 10 Hz── radio link <── TelemetryPacket
 ```
 
-## Per-Motor Timeout Stabilizer
+## RC Uplink Protocol
 
-**File**: `uavsim/entities/uav.py` — `_integrate_physics()`
+**File**: `uavsim/control/rc.py`
 
-Each motor tracks `_last_motor_cmd_time[i]`. If `_MOTOR_TIMEOUT = 0.15s` has elapsed since the last command to that motor, it is considered "timed out" and receives P+D correction. Otherwise, it gets raw throttle directly.
+Every frame carries the *absolute* stick positions (11 bytes + CRC32 on
+the link): type, sequence number, throttle 0..1000, roll/pitch/yaw
+-500..500, and a flags byte (arm switch, flight mode, failsafe action).
+The operator sends one every 20 ms whether or not anything changed. A lost
+frame costs nothing permanent: the next one carries the full state again.
+The sequence numbers / arrival times give the receiver its link quality.
+
+## Flight Controller
+
+**File**: `uavsim/control/flight_controller.py`
 
 ```
-for each motor i:
-  if now - _last_motor_cmd_time[i] >= 0.15s:
-    throttle[i] = clip(min_raw + corrections[i], 0, 1)
-  else:
-    throttle[i] = _raw_throttle[i]
+position --P--> velocity --PI--> acceleration --> tilt + collective thrust
+                                        attitude error (quaternion) --P--> rate setpoint
+                                        rate error --PI--> angular accel --> torque = I·α + ω×Iω
+                                        mixer: [T, τx, τy, τz] = A·f  ->  f = A⁻¹·[...]
+                                        motor command = sqrt(f / f_max)
 ```
 
-**P+D Correction** (timed-out motors only):
-```
-roll_corr  = clamp(rpy[0] * 0.15 + w[0] * 0.05, -0.10, +0.10)
-pitch_corr = clamp(rpy[1] * 0.15 + w[1] * 0.05, -0.10, +0.10)
+| Mode | Sticks mean | Loops running |
+|---|---|---|
+| ACRO | body rates | rate |
+| ANGLE | tilt angle, raw thrust | attitude + rate |
+| ALT_HOLD | tilt angle, climb rate | altitude + attitude + rate |
+| POS_HOLD | horizontal velocity, climb rate | all |
+| NAV (failsafe only) | 3D target / descent rate | all |
 
-M0 = +roll_corr + pitch_corr    (FR)
-M1 = +roll_corr - pitch_corr    (BR)
-M2 = -roll_corr - pitch_corr    (BL)
-M3 = -roll_corr + pitch_corr    (FL)
-```
+The mixer is built from the motor positions and spin directions. On
+saturation it keeps roll/pitch first, then yaw, then shifts the
+collective ("airmode"), so attitude control survives full and zero
+throttle. Gains are in acceleration units and multiplied by the inertia,
+so they don't need retuning when the airframe mass changes. Altitude and
+position holds brake first and latch the setpoint once the vehicle is
+nearly stopped; any change of mode or of who is flying clears the latch.
 
-**Hover controller**: `-max(vel_z, 0) * 0.4` — only brakes ascent, does not accelerate descent.
+## Failsafe
+
+**File**: `uavsim/control/failsafe.py`
+
+| Time without a valid frame | Stage | Behaviour |
+|---|---|---|
+| > 0.1 s | HOLD_LAST | keep the last sticks |
+| > 0.3 s | STAGE1 | sticks centred; ACRO forced to ANGLE |
+| > 1.0 s | STAGE2 | configured action: RTH, HOLD, LAND or DROP |
+
+HOLD_LAST/STAGE1 recover on the next valid frame. STAGE2 recovers only
+after 0.5 s of continuous good link **and** a stick deflection > 0.3
+from the pilot. RTH climbs to max(15 m, current altitude), flies home at
+6 m/s, descends at 1 m/s and disarms on touchdown.
+
+## Fixed-Step Simulation
+
+**File**: `main.py`
+
+Physics + control run at 250 Hz in simulation time with an accumulator;
+the renderer runs at up to 60 FPS. All protocol timing (RC rate, LQ
+windows, failsafe stages) uses simulation time, so pausing never trips a
+failsafe and results don't depend on frame rate.
 
 ## GNU Radio in Isolated Subprocess
 
@@ -64,38 +100,20 @@ Main process:              GNU Radio subprocess:
 
 **File**: `uavsim/comms/telemetry.py`
 
-The UAV sends packets every 0.1s as a binary struct:
+The UAV sends a 174-byte packet every 0.1 s (`"!H20d4h4B"`):
 
 | Field | Type |
 |---|---|
-| timestamp | double |
-| position (xyz) | 3× double |
-| velocity (xyz) | 3× double |
-| attitude_rpy | 3× double |
-| angular_velocity | 3× double |
-| motor_throttle | 4× double |
-| battery_percent | double |
-| mass | double |
-| health_percent | double |
-| command_log | 10× int |
+| seq | uint16 |
+| timestamp (sim time) | double |
+| position, velocity, attitude_rpy, angular_velocity | 4 × 3 doubles |
+| motor commands | 4 doubles |
+| battery, mass, health | 3 doubles |
+| applied sticks (what the FC is acting on) | 4 int16 |
+| uplink LQ %, flight mode, failsafe stage/action, flags (armed, landed) | 4 bytes |
 
-`command_log` encodes (opcode, motor_id, valid) into one int32.
-
-## SENT vs RCVD Command Log
-
-**Files**: `operator.py`, `hud.py`, `renderer.py`
-
-The operator stores every sent command in `sent_log` (deque maxlen=10). The UAV includes its `_command_log` in every telemetry packet.
-
-```
-SENT        RCVD
-THR+1       THR+1     ← green (match)
-THR+2       —         ← orange (sent, lost)
-—           BAD       ← red (CRC corrupt)
-```
-
-- SENT: green if it matches RCVD, orange otherwise
-- RCVD: green if valid, red if BAD
+The doubles make it ~16× bigger than an RC frame, which is why telemetry
+is the first thing to die inside a jammer. Compacting it is planned.
 
 ## ChaoticLayer — Lorenz Attractor (Secret Bridge)
 

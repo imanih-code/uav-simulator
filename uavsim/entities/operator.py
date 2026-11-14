@@ -1,149 +1,199 @@
-"""UAVOperator: the human-in-the-loop controller.
+"""UAVOperator: the pilot's transmitter (and ground station receiver).
 
-Reads which control keys are currently held down, translates them into
-bit-encoded Commands, and transmits them through its CommGatewayOutput --
-which is now a real (simulated) radio link. It also owns a
-CommGatewayInput used to receive telemetry broadcast by the UAV; the HUD
-reads that buffered telemetry directly from the operator.
+Works like a real RC transmitter: it reads the pilot's sticks and
+switches, and sends one RC frame with their *absolute* positions at a
+fixed rate (50 Hz), whether or not anything changed. Holding a stick does
+not "repeat a command"; a lost frame is simply replaced by the next one.
 
-Commands are rate-limited per motor+direction rather than sent once per
-render frame: a real digital transmitter has its own update rate,
-independent of however fast the game is rendering, and GNU Radio's actual
-per-burst cost makes flooding the link at 60/sec both unrealistic and
-unnecessary.
+Keyboard layout (Mode 2, like most RC transmitters):
 
-Holding a key longer progressively accelerates the send rate so the
-throttle steps feel fine with short taps but grow coarser when held.
+    left stick           right stick
+    W / S  throttle      I / K  pitch forward / back
+    A / D  yaw L / R     J / L  roll left / right
+
+Roll, pitch and yaw spring back to centre when released, like real
+sticks. Throttle depends on the flight mode: in ALT_HOLD / POS_HOLD it is
+a spring stick too (centre = hold altitude), in ANGLE / ACRO it stays
+where you leave it (W/S move it up/down).
+
+A gamepad, when connected, drives the sticks directly (see `PilotInput`).
+
+The operator also receives telemetry and measures downlink quality.
 """
 from __future__ import annotations
 
-import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Set, Tuple
+from typing import Deque, Optional, Set, Tuple
 
-from uavsim.comms.command import Command, CommandOpcode
 from uavsim.comms.gateway import CommGatewayInput, CommGatewayOutput
 from uavsim.comms.telemetry import TelemetryPacket
+from uavsim.control.failsafe import windowed_quality
+from uavsim.control.rc import FailsafeAction, FlightMode, RCPacket, Sticks
 
-# Keyboard layout: a numeric key accelerates a motor, the letter directly
-# above it on a QWERTY keyboard decelerates that same motor.
-#   1 / Q -> front-right motor
-#   2 / W -> back-right motor
-#   3 / E -> back-left motor
-#   4 / R -> front-left motor
-#   5 / T -> all four motors at once
-THROTTLE_UP_KEYS = {"1": 0, "2": 1, "3": 2, "4": 3, "5": -1}
-THROTTLE_DOWN_KEYS = {"q": 0, "w": 1, "e": 2, "r": 3, "t": -1}
+_MODE_CYCLE = (FlightMode.POS_HOLD, FlightMode.ALT_HOLD, FlightMode.ANGLE, FlightMode.ACRO)
+_FAILSAFE_CYCLE = (FailsafeAction.RTH, FailsafeAction.HOLD, FailsafeAction.LAND, FailsafeAction.DROP)
 
-# Base interval between consecutive transmissions of the same command.
-# The actual interval shrinks as a key is held (see hold-duration
-# acceleration below), but 20 Hz is the floor.
-_COMMAND_SEND_INTERVAL = 0.05
-
-# Hold-duration thresholds and their corresponding send intervals.
-_HOLD_ACCELERATION: Tuple[Tuple[float, float], ...] = (
-    (0.0,    0.05),    # tap → 20 Hz, fine steps
-    (0.3,    0.025),   # ⅓ s → 40 Hz
-    (0.7,    0.012),   # ⅔ s → ~80 Hz
-    (1.5,    0.008),   # 1½ s → ~120 Hz
-)
-
-_OPCODE_LABELS = {
-    0: "THR+", 1: "THR-", 2: "ARM", 3: "DSRM", 4: "CUT",
-    5: "THR+A", 6: "THR-A",
-}
+_STICK_RATE = 3.0          # stick travel per second while a key is held (full deflection in 1/3 s)
+_STICK_RETURN_RATE = 6.0   # spring-back speed when released
+_THROTTLE_KEY_RATE = 0.35  # ANGLE/ACRO: throttle change per second while W/S held
+_GAMEPAD_DEADZONE = 0.08
 
 
 @dataclass
+class PilotInput:
+    """Everything the pilot did this frame (filled by the window layer)."""
+
+    keys: Set[str] = field(default_factory=set)  # held keys among w s a d i k j l
+    # (left_x, left_y, right_x, right_y) in [-1, 1], pygame convention (up = -1); None if no pad
+    gamepad_axes: Optional[Tuple[float, float, float, float]] = None
+    toggle_arm: bool = False
+    cycle_mode: bool = False
+    cycle_failsafe: bool = False
+    toggle_tx: bool = False
+
+
 class UAVOperator:
-    command_output: CommGatewayOutput
-    telemetry_input: CommGatewayInput
-    latest_telemetry: Optional[TelemetryPacket] = field(default=None, init=False)
-    _last_sent_at: Dict[Tuple[CommandOpcode, int], float] = field(
-        default_factory=dict, init=False
-    )
-    _key_hold_start: Dict[str, float] = field(default_factory=dict, init=False)
-    sent_log: deque = field(
-        default_factory=lambda: deque(maxlen=10), init=False
-    )
+    def __init__(
+        self,
+        command_output: CommGatewayOutput,
+        telemetry_input: CommGatewayInput,
+        rc_rate_hz: float = 50.0,
+        telemetry_rate_hz: float = 10.0,
+    ) -> None:
+        self.command_output = command_output
+        self.telemetry_input = telemetry_input
+        self.rc_rate_hz = rc_rate_hz
+        self.telemetry_rate_hz = telemetry_rate_hz
+        self.mode = FlightMode.ALT_HOLD
+        self.failsafe_action = FailsafeAction.RTH
+        self.reset()
 
-    @staticmethod
-    def _send_interval(hold_duration: float) -> float:
-        """Return the send interval for a key held for `hold_duration` seconds.
+    def reset(self) -> None:
+        self.arm_switch = False
+        self.tx_enabled = True
+        self.sticks = Sticks(throttle=self._neutral_throttle())
+        self.latest_telemetry: Optional[TelemetryPacket] = None
+        self.last_telemetry_time: Optional[float] = None
+        self.frames_sent = 0
+        self._seq = 0
+        self._next_send_time: Optional[float] = None
+        self._telemetry_arrivals: Deque[float] = deque()
+        self._first_telemetry_time: Optional[float] = None
 
-        Short taps keep the base interval for fine adjustment; longer
-        holds progressively shorten it so the throttle moves faster.
-        """
-        for threshold, interval in reversed(_HOLD_ACCELERATION):
-            if hold_duration >= threshold:
-                return interval
-        return _COMMAND_SEND_INTERVAL
+    # -- pilot input (real time) ---------------------------------------------
+    def handle_input(self, pilot: PilotInput, dt: float) -> None:
+        if pilot.toggle_arm:
+            self.arm_switch = not self.arm_switch
+        if pilot.cycle_mode:
+            self.mode = _next_in(_MODE_CYCLE, self.mode)
+            if self.mode in (FlightMode.ALT_HOLD, FlightMode.POS_HOLD):
+                self.sticks = Sticks(0.5, self.sticks.roll, self.sticks.pitch, self.sticks.yaw)
+        if pilot.cycle_failsafe:
+            self.failsafe_action = _next_in(_FAILSAFE_CYCLE, self.failsafe_action)
+        if pilot.toggle_tx:
+            self.tx_enabled = not self.tx_enabled
 
-    def handle_pressed_keys(self, pressed_keys: Set[str]) -> None:
-        """Translate currently-held keys into commands sent to the UAV.
+        if pilot.gamepad_axes is not None:
+            self.sticks = self._sticks_from_gamepad(pilot.gamepad_axes, pilot.keys, dt)
+        else:
+            self.sticks = self._sticks_from_keyboard(pilot.keys, dt)
 
-        Called once per simulation tick with the set of keys currently
-        held down. The send rate per (opcode, motor) pair accelerates as
-        the key is held, then resets when released.
-        """
-        now = time.monotonic()
+    def _sticks_from_keyboard(self, keys: Set[str], dt: float) -> Sticks:
+        k = {key.lower() for key in keys}
+        roll = _approach(self.sticks.roll, _axis(k, "l", "j"), dt)
+        pitch = _approach(self.sticks.pitch, _axis(k, "i", "k"), dt)
+        yaw = _approach(self.sticks.yaw, _axis(k, "d", "a"), dt)
+        if self._throttle_springs():
+            throttle = _approach(self.sticks.throttle, 0.5 + 0.5 * _axis(k, "w", "s"), dt,
+                                 centre=0.5)
+        else:
+            throttle = self.sticks.throttle + _axis(k, "w", "s") * _THROTTLE_KEY_RATE * dt
+        return Sticks(throttle, roll, pitch, yaw).clamped()
 
-        # Start tracking newly pressed keys; remove released ones.
-        for key in pressed_keys:
-            if key not in self._key_hold_start:
-                self._key_hold_start[key] = now
-        for key in list(self._key_hold_start.keys()):
-            if key not in pressed_keys:
-                del self._key_hold_start[key]
+    def _sticks_from_gamepad(
+        self, axes: Tuple[float, float, float, float], keys: Set[str], dt: float
+    ) -> Sticks:
+        lx, ly, rx, ry = (_pad_deadzone(a) for a in axes)
+        keyboard = self._sticks_from_keyboard(keys, dt)
+        return Sticks(
+            throttle=(1.0 - ly) * 0.5,
+            roll=rx + keyboard.roll,
+            pitch=-ry + keyboard.pitch,
+            yaw=lx + keyboard.yaw,
+        ).clamped()
 
-        for key in pressed_keys:
-            command = self._command_for_key(key)
-            if command is None:
-                continue
-            send_key = (command.opcode, command.motor_id)
-            hold_duration = now - self._key_hold_start.get(key, now)
-            interval = self._send_interval(hold_duration)
+    def _throttle_springs(self) -> bool:
+        return self.mode in (FlightMode.ALT_HOLD, FlightMode.POS_HOLD)
 
-            last_sent = self._last_sent_at.get(send_key, 0.0)
-            if now - last_sent < interval:
-                continue
-            self._last_sent_at[send_key] = now
-            self.command_output.send(command.encode())
-            self.sent_log.append(self._command_to_label(command))
+    def _neutral_throttle(self) -> float:
+        return 0.5 if self._throttle_springs() else 0.0
 
-    @staticmethod
-    def _command_to_label(command: Command) -> str:
-        label = _OPCODE_LABELS.get(int(command.opcode), f"OP{int(command.opcode)}")
-        if command.motor_id < 4:
-            label += str(command.motor_id + 1)
-        return label
+    # -- transmitter (simulation time) ---------------------------------------
+    def tick(self, now: float) -> None:
+        """Send an RC frame if one is due at simulation time `now`."""
+        period = 1.0 / self.rc_rate_hz
+        if self._next_send_time is None or self._next_send_time < now - period:
+            self._next_send_time = now
+        if now + 1e-9 < self._next_send_time:
+            return
+        self._next_send_time += period
+        if not self.tx_enabled:
+            return
+        frame = RCPacket(
+            seq=self._seq,
+            sticks=self.sticks,
+            arm_switch=self.arm_switch,
+            mode=self.mode,
+            failsafe_action=self.failsafe_action,
+        )
+        self._seq = (self._seq + 1) & 0xFF
+        self.frames_sent += 1
+        self.command_output.send(frame.encode())
 
-    @staticmethod
-    def _command_for_key(key: str) -> Optional[Command]:
-        key = key.lower()
-        if key in THROTTLE_UP_KEYS:
-            motor_id = THROTTLE_UP_KEYS[key]
-            if motor_id == -1:
-                return Command(CommandOpcode.THROTTLE_UP_ALL)
-            return Command(CommandOpcode.THROTTLE_UP, motor_id=motor_id)
-        if key in THROTTLE_DOWN_KEYS:
-            motor_id = THROTTLE_DOWN_KEYS[key]
-            if motor_id == -1:
-                return Command(CommandOpcode.THROTTLE_DOWN_ALL)
-            return Command(CommandOpcode.THROTTLE_DOWN, motor_id=motor_id)
-        return None
-
-    def poll_telemetry(self) -> Optional[TelemetryPacket]:
-        """Drain any pending telemetry packets, keeping only the latest.
-
-        Corrupted packets that somehow pass the radio link's own CRC check
-        (astronomically unlikely, but never assume never) are simply
-        skipped rather than crashing the HUD.
-        """
+    # -- ground station receiver -----------------------------------------------
+    def poll_telemetry(self, now: float) -> Optional[TelemetryPacket]:
+        """Drain pending telemetry, keeping the latest valid packet."""
         for raw_packet in self.telemetry_input.receive_all():
             try:
                 self.latest_telemetry = TelemetryPacket.decode(raw_packet)
             except ValueError:
                 continue
+            if self._first_telemetry_time is None:
+                self._first_telemetry_time = now
+            self.last_telemetry_time = now
+            self._telemetry_arrivals.append(now)
         return self.latest_telemetry
+
+    def downlink_quality(self, now: float, window: float = 1.0) -> float:
+        return windowed_quality(self._telemetry_arrivals, self._first_telemetry_time, now,
+                                self.telemetry_rate_hz, window)
+
+    def telemetry_age(self, now: float) -> float:
+        if self.last_telemetry_time is None:
+            return float("inf")
+        return now - self.last_telemetry_time
+
+
+def _axis(keys: Set[str], positive: str, negative: str) -> float:
+    return (1.0 if positive in keys else 0.0) - (1.0 if negative in keys else 0.0)
+
+
+def _approach(current: float, target: float, dt: float, centre: float = 0.0) -> float:
+    rate = _STICK_RETURN_RATE if target == centre else _STICK_RATE
+    step = rate * dt
+    if abs(target - current) <= step:
+        return target
+    return current + step if target > current else current - step
+
+
+def _pad_deadzone(value: float) -> float:
+    if abs(value) < _GAMEPAD_DEADZONE:
+        return 0.0
+    sign = 1.0 if value > 0 else -1.0
+    return sign * (abs(value) - _GAMEPAD_DEADZONE) / (1.0 - _GAMEPAD_DEADZONE)
+
+
+def _next_in(cycle: tuple, current):
+    index = cycle.index(current) if current in cycle else -1
+    return cycle[(index + 1) % len(cycle)]

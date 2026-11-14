@@ -15,17 +15,18 @@ Input. The UAVOperator holds an Output (commands out) and an Input
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import numpy as np
 
-from uavsim.comms.gnuradio_link import GnuRadioChannel
+if TYPE_CHECKING:  # either a GnuRadioChannel or a LoopbackChannel
+    from uavsim.comms.gnuradio_link import GnuRadioChannel
 
 
 class CommGatewayOutput:
     """Transmitting endpoint. Entities call `send` to push a raw payload."""
 
-    def __init__(self, channel: GnuRadioChannel) -> None:
+    def __init__(self, channel: "GnuRadioChannel") -> None:
         self._channel = channel
 
     def send(self, payload: bytes) -> None:
@@ -42,7 +43,7 @@ class CommGatewayInput:
     """Receiving endpoint. Entities call `receive`/`receive_all` to read
     whatever the channel actually managed to deliver."""
 
-    def __init__(self, channel: GnuRadioChannel) -> None:
+    def __init__(self, channel: "GnuRadioChannel") -> None:
         self._channel = channel
 
     def receive(self) -> Optional[bytes]:

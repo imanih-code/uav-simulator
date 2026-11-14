@@ -69,12 +69,21 @@ UAV_ARM_COLOR = (0.6, 0.6, 0.6)
 
 HUD_TEXT_COLOR = (0.75, 1.0, 0.8)
 HUD_LOG_OK_COLOR = (0.3, 1.0, 0.4)     # green — received correctly
-HUD_LOG_BAD_COLOR = (1.0, 0.3, 0.3)     # red — CRC corrupt
-HUD_LOG_SENT_COLOR = (1.0, 0.65, 0.0)   # orange — sent but not received
 HUD_RAW_SIGNAL_COLOR = (0.2, 0.5, 0.8)  # dim blue, raw analog signal
 HUD_PANEL_BORDER_COLOR = (0.4, 0.6, 0.5)
 HUD_WAVEFORM_COLOR = (0.3, 1.0, 0.5)
 HUD_BAR_COLOR = (0.9, 0.9, 0.9)
+
+HOME_COLOR = (0.3, 0.9, 1.0)
+SHADOW_COLOR = (0.35, 0.35, 0.4)
+STICK_TX_COLOR = (0.3, 1.0, 0.4)        # what the pilot sends
+STICK_RX_COLOR = (0.3, 0.8, 1.0)        # what the UAV is applying
+BANNER_ALERT_COLOR = (1.0, 0.25, 0.2)
+BANNER_WARN_COLOR = (1.0, 0.75, 0.1)
+BANNER_INFO_COLOR = (0.6, 0.6, 0.6)
+
+MODE_NAMES = {0: "ACRO", 1: "ANGLE", 2: "ALT", 3: "POS"}
+FAILSAFE_ACTION_NAMES = {0: "HOLD", 1: "LAND", 2: "RTH", 3: "DROP"}
 
 JAMMER_BODY_COLOR = (1.0, 0.3, 0.1)     # orange-red
 JAMMER_CIRCLE_COLOR = (1.0, 0.1, 0.1)   # red for radius circles
@@ -120,6 +129,8 @@ class Renderer:
             0.0, 0.0, 1.0,
         )
         self._draw_ground()
+        self._draw_home_marker()
+        self._draw_ground_shadow()
         motor_points = self._draw_uav(camera_eye)
         self._project_motor_labels(motor_points)
         for jammer in jammers:
@@ -127,14 +138,16 @@ class Renderer:
 
     def draw_hud(self, snapshot: HUDSnapshot, paused: bool = False,
                  jammers: List[Jammer] = [], uplink_noise: float = 0.0,
-                 downlink_noise: float = 0.0, dssc_N: int = 0) -> None:
+                 downlink_noise: float = 0.0, dssc_N: int = 0,
+                 link_backend: str = "", gamepad: str = "") -> None:
         self._begin_hud_overlay()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
         self._draw_dssc_indicator(dssc_N,
                                    uplink_corr=snapshot.uplink_correlation,
                                    downlink_corr=snapshot.downlink_correlation)
-        self._draw_command_log(snapshot)
+        self._draw_flight_status(snapshot, link_backend, gamepad)
+        self._draw_banner(snapshot)
         self._draw_signal_panels(snapshot)
         if snapshot.has_telemetry and snapshot.motor_throttle is not None:
             self._draw_throttle_bars(snapshot.motor_throttle, snapshot.now)
@@ -180,6 +193,42 @@ class Renderer:
         glVertex3f(0.0, -GROUND_GRID_SPAN, ground_z)
         glVertex3f(0.0, GROUND_GRID_SPAN, ground_z)
 
+        glEnd()
+
+    def _draw_home_marker(self) -> None:
+        """'H' on the ground where the UAV was armed (RTH destination)."""
+        hx, hy = float(self.uav.home[0]), float(self.uav.home[1])
+        z = self.world.ground.ground_z + 0.01
+        s = 0.6
+        glColor3f(*HOME_COLOR)
+        glBegin(GL_LINES)
+        for x0, y0, x1, y1 in ((-s, -s, -s, s), (s, -s, s, s), (-s, 0.0, s, 0.0)):
+            glVertex3f(hx + x0, hy + y0, z)
+            glVertex3f(hx + x1, hy + y1, z)
+        glEnd()
+        glBegin(GL_LINE_LOOP)
+        for i in range(24):
+            a = 2.0 * np.pi * i / 24
+            glVertex3f(hx + 1.2 * np.cos(a), hy + 1.2 * np.sin(a), z)
+        glEnd()
+
+    def _draw_ground_shadow(self) -> None:
+        """Drop line + footprint under the UAV: the main depth cue for a pilot."""
+        c = self.uav.body.position
+        z = self.world.ground.ground_z + 0.01
+        if c[2] - z < 0.05:
+            return
+        glColor3f(*SHADOW_COLOR)
+        glBegin(GL_LINES)
+        dash, gap = 0.25, 0.25
+        h = z
+        while h < c[2]:
+            glVertex3f(c[0], c[1], h)
+            glVertex3f(c[0], c[1], min(h + dash, c[2]))
+            h += dash + gap
+        for p in self.uav.motor_world_positions():
+            glVertex3f(c[0], c[1], z)
+            glVertex3f(p[0], p[1], z)
         glEnd()
 
     def _draw_uav(self, camera_eye: np.ndarray) -> List[np.ndarray]:
@@ -421,26 +470,28 @@ class Renderer:
         line_height = self._font._size + line_gap
 
         lines = self._telemetry_lines(snapshot)
+        # Frozen telemetry (downlink jammed) is greyed out: those are old values.
+        colour = BANNER_INFO_COLOR if snapshot.telemetry_stale else HUD_TEXT_COLOR
 
         y = self.hud_height - margin - self._font._size
         for line in lines:
-            self._font.draw(line, margin, y, colour=HUD_TEXT_COLOR)
+            self._font.draw(line, margin, y, colour=colour)
             y -= line_height
 
     @staticmethod
     def _telemetry_lines(snapshot: HUDSnapshot) -> List[str]:
         if not snapshot.has_telemetry:
-            return ["BAT:--", "ALT:--", "MASS:--", "HP:--",
-                    "POSX:--", "POSY:--",
-                    "ROL:--", "PIT:--", "YAW:--"]
-
+            return ["BAT:--", "ALT:--", "VZ:--", "SPD:--", "HP:--",
+                    "POSX:--", "POSY:--", "ROL:--", "PIT:--", "YAW:--"]
         x, y, z = snapshot.position
+        vx, vy, vz = snapshot.velocity
         roll, pitch, yaw = snapshot.attitude_deg
         return [
             f"BAT:{snapshot.battery_percent:.0f}%",
             f"ALT:{z:.1f}",
-            f"MASS:{snapshot.mass_kg:.2f}",
-            f"HP:{snapshot.health_percent:.0f}%" if snapshot.health_percent is not None else "HP:--",
+            f"VZ:{vz:+.1f}",
+            f"SPD:{np.hypot(vx, vy):.1f}",
+            f"HP:{snapshot.health_percent:.0f}%",
             f"POSX:{x:.1f}",
             f"POSY:{y:.1f}",
             f"ROL:{roll:.1f}",
@@ -521,39 +572,113 @@ class Renderer:
                         colour=HUD_TEXT_COLOR)
 
 
-    # -- HUD: command log (SENT vs RCVD) ----------------------------------------
-    def _draw_command_log(self, snapshot: HUDSnapshot) -> None:
-        if not snapshot.sent_log and not snapshot.command_log:
-            return
+    # -- HUD: flight status, link quality and stick monitor ---------------------
+    def _draw_flight_status(self, snapshot: HUDSnapshot, link_backend: str, gamepad: str) -> None:
         margin = 14
         line_h = self._font._size + 6
-        telemetry_height = 10 * (self._font._size + 6)
-        sent_x = margin
-        rcvd_x = margin + 85
+        y = self.hud_height - margin - self._font._size - 10 * line_h - 10
 
-        sent_items = list(reversed(snapshot.sent_log))
-        rcvd_items = list(reversed(snapshot.command_log))
+        mode = MODE_NAMES.get(snapshot.tx_mode, "?")
+        fs = FAILSAFE_ACTION_NAMES.get(snapshot.tx_failsafe_action, "?")
+        arm_text = "ARM:ON" if snapshot.tx_arm_switch else "ARM:OFF"
+        arm_colour = BANNER_WARN_COLOR if snapshot.tx_arm_switch else HUD_TEXT_COLOR
+        if snapshot.uplink_lq is None or snapshot.telemetry_stale:
+            ul = "--"
+        else:
+            ul = f"{snapshot.uplink_lq:.0f}"
+        link_name = {"gnuradio": "GNURADIO", "loopback": "NUMPY"}.get(
+            link_backend, link_backend.upper())
 
-        n = max(len(sent_items), len(rcvd_items))
-        y = self.hud_height - margin - 10 - telemetry_height - 12 - n * line_h
+        rows = [
+            (f"MODE:{mode}", HUD_TEXT_COLOR),
+            (arm_text, arm_colour),
+            (f"FS:{fs}", HUD_TEXT_COLOR),
+            (f"LQ UP:{ul} DN:{snapshot.downlink_lq:.0f}", self._lq_colour(snapshot)),
+            (f"LINK:{link_name}" + (" PAD" if gamepad else ""), BANNER_INFO_COLOR),
+        ]
+        for text, colour in rows:
+            self._font.draw(text, margin, y, colour=colour)
+            y -= line_h
 
-        col_header_y = y - line_h + 2
-        self._font.draw("SENT", sent_x, col_header_y, colour=(0.5, 0.5, 0.5))
-        self._font.draw("RCVD", rcvd_x, col_header_y, colour=(0.5, 0.5, 0.5))
+        box = 46.0
+        gap = 8.0
+        y -= box - self._font._size + 4
+        self._draw_stick_pair("TX", snapshot.tx_sticks, margin, y, box, gap, STICK_TX_COLOR)
+        rx = None
+        if snapshot.has_telemetry and not snapshot.telemetry_stale:
+            rx = snapshot.rx_sticks
+        self._draw_stick_pair("RX", rx, margin, y - box - 22, box, gap, STICK_RX_COLOR)
 
-        for i in range(n):
-            y += line_h
-            sent_label = sent_items[i] if i < len(sent_items) else ""
-            rcvd_label, rcvd_valid = rcvd_items[i] if i < len(rcvd_items) else ("", True)
+    @staticmethod
+    def _lq_colour(snapshot: HUDSnapshot) -> Tuple[float, float, float]:
+        values = [snapshot.downlink_lq]
+        if snapshot.uplink_lq is not None and not snapshot.telemetry_stale:
+            values.append(snapshot.uplink_lq)
+        worst = min(values)
+        if worst >= 80:
+            return HUD_LOG_OK_COLOR
+        if worst >= 40:
+            return BANNER_WARN_COLOR
+        return BANNER_ALERT_COLOR
 
-            if sent_label:
-                match = sent_label == rcvd_label and rcvd_valid
-                s_color = HUD_LOG_OK_COLOR if match else HUD_LOG_SENT_COLOR
-                self._font.draw(sent_label, sent_x, y, colour=s_color)
+    def _draw_stick_pair(self, label: str, sticks, x: float, y: float, box: float,
+                         gap: float, colour: Tuple[float, float, float]) -> None:
+        """Two stick gimbals: left = yaw/throttle, right = roll/pitch (Mode 2)."""
+        left_x = x + 24
+        right_x = left_x + box + gap
+        self._font.draw(label, x, y + box / 2.0 - self._font._size / 2.0, colour=colour)
+        for bx in (left_x, right_x):
+            glColor3f(*HUD_PANEL_BORDER_COLOR)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(bx, y)
+            glVertex2f(bx + box, y)
+            glVertex2f(bx + box, y + box)
+            glVertex2f(bx, y + box)
+            glEnd()
+            glBegin(GL_LINES)
+            glVertex2f(bx + box / 2.0, y + 3)
+            glVertex2f(bx + box / 2.0, y + box - 3)
+            glVertex2f(bx + 3, y + box / 2.0)
+            glVertex2f(bx + box - 3, y + box / 2.0)
+            glEnd()
+        if sticks is None:
+            self._font.draw("--", right_x + box + 6, y + box / 2.0 - self._font._size / 2.0,
+                            colour=BANNER_INFO_COLOR)
+            return
+        throttle, roll, pitch, yaw = sticks
+        half = box / 2.0 - 4.0
+        points = (
+            (left_x + box / 2.0 + yaw * half, y + 4.0 + throttle * (box - 8.0)),
+            (right_x + box / 2.0 + roll * half, y + box / 2.0 + pitch * half),
+        )
+        glPointSize(7.0)
+        glColor3f(*colour)
+        glBegin(GL_POINTS)
+        for px, py in points:
+            glVertex2f(px, py)
+        glEnd()
+        glPointSize(1.0)
 
-            if rcvd_label:
-                r_color = HUD_LOG_OK_COLOR if rcvd_valid else HUD_LOG_BAD_COLOR
-                self._font.draw(rcvd_label, rcvd_x, y, colour=r_color)
+    def _draw_banner(self, snapshot: HUDSnapshot) -> None:
+        """Top-centre alert: what a real OSD would flash at the pilot."""
+        blink = int(snapshot.now * 3) % 2 == 0
+        text, colour, font = "", HUD_TEXT_COLOR, self._pause_font
+        if not snapshot.tx_enabled:
+            text, colour = "TX OFF", BANNER_WARN_COLOR
+        elif snapshot.has_telemetry and snapshot.telemetry_stale:
+            text, colour = "TLM LOST", BANNER_WARN_COLOR
+        elif snapshot.has_telemetry and snapshot.armed and snapshot.failsafe_stage >= 3:
+            action = FAILSAFE_ACTION_NAMES.get(snapshot.failsafe_action, "?")
+            text, colour = f"FAILSAFE {action}", BANNER_ALERT_COLOR
+        elif snapshot.has_telemetry and snapshot.armed and snapshot.failsafe_stage >= 1:
+            text, colour = "RX LOSS", BANNER_ALERT_COLOR
+        elif snapshot.has_telemetry and not snapshot.armed:
+            text, colour, font = "DISARMED  SPACE TO ARM", BANNER_INFO_COLOR, self._font
+            blink = True
+        if not text or not blink:
+            return
+        tw = font.text_width(text)
+        font.draw(text, self.hud_width / 2.0 - tw / 2.0, self.hud_height - 60, colour=colour)
 
     # -- HUD: TX/RX oscilloscope-style signal panels ----------------------------
     def _draw_signal_panels(self, snapshot: HUDSnapshot) -> None:
@@ -802,6 +927,16 @@ class Renderer:
             glEnd()
 
         glPointSize(1.0)
+
+        # Home point
+        hx = cx + (self.uav.home[0] - uav_pos[0]) * scale
+        hy = cy + (self.uav.home[1] - uav_pos[1]) * scale
+        glColor3f(*HOME_COLOR)
+        glBegin(GL_LINE_LOOP)
+        for j in range(4):
+            a = np.pi / 4 + j * np.pi / 2
+            glVertex2f(hx + 4.0 * np.cos(a), hy + 4.0 * np.sin(a))
+        glEnd()
 
         # UAV icon: motor circles at fixed icon radius, rotated by yaw
         for i, motor in enumerate(self.uav.motors):

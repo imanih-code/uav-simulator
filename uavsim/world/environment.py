@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from uavsim.physics.rigid_body import RigidBody
 
@@ -81,4 +82,10 @@ def apply_ground_contact(body: RigidBody, ground: FlatGroundPlane, dt: float) ->
     friction = max(0.0, 1.0 - _GROUND_FRICTION_PER_SECOND * dt)
     body.velocity[0] *= friction
     body.velocity[1] *= friction
+
+    # Landing gear sits flat on the ground: it cannot roll or pitch while
+    # resting, only keep its heading (and slowly stop spinning on it).
+    yaw = body.orientation.as_euler("xyz")[2]
+    body.orientation = Rotation.from_euler("z", yaw)
+    body.angular_velocity_body = np.array([0.0, 0.0, body.angular_velocity_body[2] * friction])
     return True
