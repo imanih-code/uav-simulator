@@ -5,13 +5,24 @@ used -- no textures, no meshes. Text is rendered via TTF texture atlas
 """
 from __future__ import annotations
 
-import time
 from collections import deque
 from typing import List, Tuple
 
 import numpy as np
 from OpenGL.GL import (
     GL_BLEND,
+    GL_COLOR_ARRAY,
+    GL_FALSE,
+    GL_FLOAT,
+    GL_QUADS,
+    GL_TRUE,
+    GL_VERTEX_ARRAY,
+    glColorPointer,
+    glDepthMask,
+    glDisableClientState,
+    glDrawArrays,
+    glEnableClientState,
+    glVertexPointer,
     GL_DEPTH_TEST,
     GL_LINE_LOOP,
     GL_LINE_STRIP,
@@ -47,11 +58,12 @@ from OpenGL.GL import (
 )
 from OpenGL.GLU import gluLookAt, gluProject
 
-from uavsim.entities.jammer import Jammer
+from uavsim.entities.jammer import Jammer, JammerKind
 from uavsim.entities.uav import UAV
 from uavsim.hud.hud import SIGNAL_WINDOW_SECONDS, HUDSnapshot
 from uavsim.rendering.ttf_font import TTFFont
 from uavsim.world.environment import WORLD_EXTENT_HALF, World
+from uavsim.world.rf import LinkBudget, RFEnvironment
 
 GROUND_COLOR = (0.2, 0.25, 0.3)
 GROUND_MAJOR_COLOR = (0.3, 0.4, 0.5)
@@ -85,6 +97,20 @@ BANNER_INFO_COLOR = (0.6, 0.6, 0.6)
 MODE_NAMES = {0: "ACRO", 1: "ANGLE", 2: "ALT", 3: "POS"}
 FAILSAFE_ACTION_NAMES = {0: "HOLD", 1: "LAND", 2: "RTH", 3: "DROP"}
 
+JAMMER_KIND_COLORS = {
+    JammerKind.BARRAGE: (1.0, 0.2, 0.1),   # red: always on
+    JammerKind.PULSED: (1.0, 0.3, 0.85),   # magenta: on/off bursts
+    JammerKind.SWEPT: (1.0, 0.65, 0.1),    # orange: sweeps through our channel
+}
+GROUND_STATION_COLOR = (0.85, 0.95, 1.0)
+HEATMAP_CELL = 5.0            # m
+HEATMAP_REFRESH = 0.5         # s of sim time
+# Thresholds from the calibrated link model (loopback_link): 11-byte RC
+# frames arrive ~90% of the time at 11 dB and ~10% at 7 dB.
+HEATMAP_GOOD_SINR = 14.0      # dB: comfortable margin -> map transparent
+HEATMAP_MARGINAL_SINR = 11.0  # dB: below this RC frames start getting lost
+HEATMAP_DEAD_SINR = 7.0       # dB: below this the control link is effectively gone
+
 JAMMER_BODY_COLOR = (1.0, 0.3, 0.1)     # orange-red
 JAMMER_CIRCLE_COLOR = (1.0, 0.1, 0.1)   # red for radius circles
 JAMMER_BLINK_COLOR_ON = (1.0, 0.0, 0.0)  # red on
@@ -117,29 +143,41 @@ class Renderer:
         self.hud_width = hud_width
         self.hud_height = hud_height
         self._motor_labels: List[Tuple[float, float, int]] = []
-        self._noise_history: deque = deque(maxlen=300)
+        self._sinr_history: deque = deque(maxlen=300)
+        self._heatmap_key = None
+        self._heatmap_time = -1e9
+        self._heatmap_verts = np.zeros((0, 3), dtype=np.float32)
+        self._heatmap_cols = np.zeros((0, 4), dtype=np.float32)
+        self._heatmap_cells = None  # (centres_xy, rgba) for the minimap
+        self._heatmap_visible = False
         self._font = TTFFont("assets/fonts/7-segment.ttf", size=14)
         self._pause_font = TTFFont("assets/fonts/7-segment.ttf", size=28)
 
     def draw_scene(self, camera_eye: np.ndarray, camera_target: np.ndarray,
-                   jammers: List[Jammer] = []) -> None:
+                   jammers: List[Jammer] = (), sim_time: float = 0.0,
+                   budget: LinkBudget = None, heatmap_rf: RFEnvironment = None) -> None:
         gluLookAt(
             camera_eye[0], camera_eye[1], camera_eye[2],
             camera_target[0], camera_target[1], camera_target[2],
             0.0, 0.0, 1.0,
         )
+        self._heatmap_visible = heatmap_rf is not None
+        if heatmap_rf is not None:
+            self._draw_heatmap(heatmap_rf, jammers, sim_time)
         self._draw_ground()
         self._draw_home_marker()
+        self._draw_ground_station()
+        if budget is not None:
+            self._draw_link_line(budget)
         self._draw_ground_shadow()
         motor_points = self._draw_uav(camera_eye)
         self._project_motor_labels(motor_points)
         for jammer in jammers:
-            self._draw_jammer(jammer, camera_eye)
+            self._draw_jammer(jammer, sim_time)
 
     def draw_hud(self, snapshot: HUDSnapshot, paused: bool = False,
-                 jammers: List[Jammer] = [], uplink_noise: float = 0.0,
-                 downlink_noise: float = 0.0, dssc_N: int = 0,
-                 link_backend: str = "", gamepad: str = "") -> None:
+                 jammers: List[Jammer] = (), budget: LinkBudget = None,
+                 dssc_N: int = 0, link_backend: str = "", gamepad: str = "") -> None:
         self._begin_hud_overlay()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
@@ -151,11 +189,13 @@ class Renderer:
         self._draw_signal_panels(snapshot)
         if snapshot.has_telemetry and snapshot.motor_throttle is not None:
             self._draw_throttle_bars(snapshot.motor_throttle, snapshot.now)
-        self._draw_noise_timeline(uplink_noise, downlink_noise)
+        self._draw_sinr_timeline(budget)
+        label_x = self.hud_width - MINIMAP_SIZE - MINIMAP_MARGIN
+        label_y = MINIMAP_MARGIN + MINIMAP_SIZE + 6
         if dssc_N > 0:
-            ds_x = self.hud_width - MINIMAP_SIZE - MINIMAP_MARGIN
-            ds_y = MINIMAP_MARGIN + MINIMAP_SIZE + 6
-            self._font.draw(f"DSSS:{dssc_N}", ds_x, ds_y, colour=(0.3, 0.8, 1.0))
+            self._font.draw(f"DSSS:{dssc_N}", label_x, label_y, colour=(0.3, 0.8, 1.0))
+        if self._heatmap_visible:
+            self._font.draw("MAP:WORST UP", label_x + 80, label_y, colour=(1.0, 0.75, 0.1))
         self._draw_minimap(jammers)
         if paused:
             self._draw_pause_overlay(len(jammers))
@@ -193,6 +233,102 @@ class Renderer:
         glVertex3f(0.0, -GROUND_GRID_SPAN, ground_z)
         glVertex3f(0.0, GROUND_GRID_SPAN, ground_z)
 
+        glEnd()
+
+    def _draw_heatmap(self, rf: RFEnvironment, jammers: List[Jammer], t: float) -> None:
+        """Uplink SINR a UAV would get at its current altitude, painted on the
+        ground (worst case: every jammer on). Transparent where the link is
+        healthy, yellow -> red where it degrades / dies."""
+        altitude = max(float(self.uav.body.position[2]), 2.0)
+        key = (round(altitude), tuple(id(j) for j in jammers))
+        if key != self._heatmap_key or t - self._heatmap_time > HEATMAP_REFRESH:
+            self._rebuild_heatmap(rf, jammers, altitude)
+            self._heatmap_key = key
+            self._heatmap_time = t
+        n = len(self._heatmap_verts)
+        if n == 0:
+            return
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDepthMask(GL_FALSE)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_COLOR_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, self._heatmap_verts)
+        glColorPointer(4, GL_FLOAT, 0, self._heatmap_cols)
+        glDrawArrays(GL_QUADS, 0, n)
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glDepthMask(GL_TRUE)
+        glDisable(GL_BLEND)
+
+    def _rebuild_heatmap(self, rf: RFEnvironment, jammers: List[Jammer], altitude: float) -> None:
+        half = self.world.extent_half
+        c = HEATMAP_CELL
+        xs = np.arange(-half + c / 2.0, half, c)
+        ys = np.arange(-half + c / 2.0, half, c)
+        sinr = rf.uplink_sinr_grid(xs, ys, altitude, self.world.ground_station, jammers)
+        gx, gy = np.meshgrid(xs, ys)
+        mask = sinr < HEATMAP_GOOD_SINR
+        sx, sy, sv = gx[mask], gy[mask], sinr[mask]
+        severity = np.clip((HEATMAP_GOOD_SINR - sv) / (HEATMAP_GOOD_SINR - HEATMAP_DEAD_SINR), 0, 1)
+        yellow = np.array([1.0, 0.85, 0.1])
+        red = np.array([1.0, 0.1, 0.05])
+        rgb = yellow + (red - yellow) * severity[:, None]
+        alpha = 0.05 + 0.25 * severity
+        rgba = np.concatenate([rgb, alpha[:, None]], axis=1).astype(np.float32)
+        self._heatmap_cells = (np.stack([sx, sy], axis=1), rgba)
+
+        z = self.world.ground.ground_z - 0.02
+        h = c / 2.0
+        corners = np.array([[-h, -h], [h, -h], [h, h], [-h, h]])
+        verts = np.empty((len(sx), 4, 3), dtype=np.float32)
+        verts[:, :, 0] = sx[:, None] + corners[None, :, 0]
+        verts[:, :, 1] = sy[:, None] + corners[None, :, 1]
+        verts[:, :, 2] = z
+        self._heatmap_verts = np.ascontiguousarray(verts.reshape(-1, 3))
+        self._heatmap_cols = np.ascontiguousarray(np.repeat(rgba, 4, axis=0))
+
+    def _draw_ground_station(self) -> None:
+        """Pilot's ground station: tripod + antenna."""
+        gs = self.world.ground_station
+        z0 = self.world.ground.ground_z
+        top = np.array([gs[0], gs[1], gs[2] - 0.3])
+        glColor3f(*GROUND_STATION_COLOR)
+        glBegin(GL_LINES)
+        for a in (0.0, 2.0 * np.pi / 3.0, 4.0 * np.pi / 3.0):
+            glVertex3f(gs[0] + 0.5 * np.cos(a), gs[1] + 0.5 * np.sin(a), z0)
+            glVertex3f(*top)
+        glVertex3f(*top)
+        glVertex3f(gs[0], gs[1], gs[2] + 0.25)
+        glEnd()
+        glPointSize(6.0)
+        glBegin(GL_POINTS)
+        glVertex3f(gs[0], gs[1], gs[2] + 0.25)
+        glEnd()
+        glPointSize(1.0)
+
+    def _draw_link_line(self, budget: LinkBudget) -> None:
+        """Ground station -> UAV, coloured by uplink SINR; dashed when it is dead."""
+        a = np.asarray(self.world.ground_station, dtype=float)
+        b = self.uav.body.position
+        sinr = budget.uplink_sinr_db
+        glColor3f(*_sinr_colour(sinr))
+        length = float(np.linalg.norm(b - a))
+        if length < 1e-6:
+            return
+        direction = (b - a) / length
+        glBegin(GL_LINES)
+        if sinr >= HEATMAP_DEAD_SINR:
+            glVertex3f(*a)
+            glVertex3f(*b)
+        else:
+            d = 0.0
+            while d < length:
+                p0 = a + direction * d
+                p1 = a + direction * min(d + 1.0, length)
+                glVertex3f(*p0)
+                glVertex3f(*p1)
+                d += 2.0
         glEnd()
 
     def _draw_home_marker(self) -> None:
@@ -343,79 +479,46 @@ class Renderer:
 
         return motor_points
 
-    def _draw_jammer(self, jammer: Jammer, camera_eye: np.ndarray) -> None:
+    def _draw_jammer(self, jammer: Jammer, t: float) -> None:
+        """Base box, mast, antenna light (lit while transmitting) and a
+        ring that pulses outward while the jammer is on."""
         pos = jammer.position
-        top = pos + np.array([0.0, 0.0, jammer.cylinder_height])
-        radius = jammer.radius
-        num_seg = 48
+        top = jammer.antenna_position
+        colour = JAMMER_KIND_COLORS.get(jammer.kind, JAMMER_BODY_COLOR)
+        on = jammer.is_on(t)
+        glColor3f(*colour)
 
-        # -- Ground circle (horizontal, dotted) --
-        glColor3f(*JAMMER_CIRCLE_COLOR)
+        r, h = 0.35, 0.6
         glBegin(GL_LINES)
-        for i in range(0, num_seg, 2):
-            a = 2.0 * np.pi * i / num_seg
-            b = 2.0 * np.pi * (i + 1) / num_seg
-            glVertex3f(pos[0] + radius * np.cos(a), pos[1] + radius * np.sin(a), pos[2])
-            glVertex3f(pos[0] + radius * np.cos(b), pos[1] + radius * np.sin(b), pos[2])
+        corners = [(-r, -r), (r, -r), (r, r), (-r, r)]
+        for i, (cx, cy) in enumerate(corners):
+            nx, ny = corners[(i + 1) % 4]
+            for z in (pos[2], pos[2] + h):
+                glVertex3f(pos[0] + cx, pos[1] + cy, z)
+                glVertex3f(pos[0] + nx, pos[1] + ny, z)
+            glVertex3f(pos[0] + cx, pos[1] + cy, pos[2])
+            glVertex3f(pos[0] + cx, pos[1] + cy, pos[2] + h)
+        glVertex3f(pos[0], pos[1], pos[2] + h)
+        glVertex3f(*top)
         glEnd()
 
-        # -- Billboard circle (camera-facing, vertical, dotted) --
-        view_dir = camera_eye - pos
-        view_dist = np.linalg.norm(view_dir)
-        if view_dist > 1e-8:
-            view_dir /= view_dist
-        ref_up = np.array([0.0, 0.0, 1.0])
-        if abs(np.dot(view_dir, ref_up)) > 0.99:
-            ref_up = np.array([0.0, 1.0, 0.0])
-        right = np.cross(view_dir, ref_up)
-        right /= np.linalg.norm(right)
-        up_perp = np.cross(right, view_dir)
-        up_perp /= np.linalg.norm(up_perp)
-
-        glColor3f(*JAMMER_CIRCLE_COLOR)
-        glBegin(GL_LINES)
-        for i in range(0, num_seg, 2):
-            theta = 2.0 * np.pi * i / num_seg
-            theta2 = 2.0 * np.pi * (i + 1) / num_seg
-            p1 = pos + radius * (np.cos(theta) * right + np.sin(theta) * up_perp)
-            p2 = pos + radius * (np.cos(theta2) * right + np.sin(theta2) * up_perp)
-            glVertex3f(p1[0], p1[1], p1[2])
-            glVertex3f(p2[0], p2[1], p2[2])
-        glEnd()
-
-        # -- Cylinder body --
-        cyl_seg = 12
-        cyl_r = jammer.cylinder_radius
-        cyl_h = jammer.cylinder_height
-        glColor3f(*JAMMER_BODY_COLOR)
-        glBegin(GL_LINES)
-        for i in range(cyl_seg):
-            theta = 2.0 * np.pi * i / cyl_seg
-            bx = cyl_r * np.cos(theta)
-            by = cyl_r * np.sin(theta)
-            # Vertical line
-            glVertex3f(pos[0] + bx, pos[1] + by, pos[2])
-            glVertex3f(pos[0] + bx, pos[1] + by, pos[2] + cyl_h)
-            # Bottom circle segment
-            b2 = 2.0 * np.pi * ((i + 1) % cyl_seg) / cyl_seg
-            glVertex3f(pos[0] + cyl_r * np.cos(theta), pos[1] + cyl_r * np.sin(theta), pos[2])
-            glVertex3f(pos[0] + cyl_r * np.cos(b2), pos[1] + cyl_r * np.sin(b2), pos[2])
-            # Top circle segment
-            glVertex3f(pos[0] + cyl_r * np.cos(theta), pos[1] + cyl_r * np.sin(theta), pos[2] + cyl_h)
-            glVertex3f(pos[0] + cyl_r * np.cos(b2), pos[1] + cyl_r * np.sin(b2), pos[2] + cyl_h)
-        glEnd()
-
-        # -- Blinking dot on top --
-        blink_on = (int(time.time() * 2) % 2) == 0
-        if blink_on:
-            glColor3f(*JAMMER_BLINK_COLOR_ON)
-        else:
-            glColor3f(*JAMMER_BLINK_COLOR_OFF)
-        glPointSize(8.0)
+        glPointSize(9.0)
+        glColor3f(*(colour if on else tuple(0.25 * c for c in colour)))
         glBegin(GL_POINTS)
-        glVertex3f(top[0], top[1], top[2])
+        glVertex3f(*top)
         glEnd()
         glPointSize(1.0)
+
+        if on:
+            phase = (t * 1.5) % 1.0
+            radius = 1.0 + 12.0 * phase
+            fade = 1.0 - phase
+            glColor3f(*(fade * c for c in colour))
+            glBegin(GL_LINE_LOOP)
+            for i in range(32):
+                a = 2.0 * np.pi * i / 32
+                glVertex3f(top[0] + radius * np.cos(a), top[1] + radius * np.sin(a), top[2])
+            glEnd()
 
     # -- motor labels (projected to screen coordinates) -------------------------
     def _project_motor_labels(self, motor_points: List[np.ndarray]) -> None:
@@ -814,9 +917,12 @@ class Renderer:
             self._font.draw(str(i + 1), x + bar_width * 0.3, margin - 2,
                             colour=HUD_TEXT_COLOR)
 
-    def _draw_noise_timeline(self, uplink_noise: float, downlink_noise: float) -> None:
-        self._noise_history.append((uplink_noise, downlink_noise))
-        hist = list(self._noise_history)
+    def _draw_sinr_timeline(self, budget: LinkBudget) -> None:
+        """Uplink / downlink SINR history (simulation instrument, not OSD)."""
+        if budget is None:
+            return
+        self._sinr_history.append((budget.uplink_sinr_db, budget.downlink_sinr_db))
+        hist = list(self._sinr_history)
         if len(hist) < 2:
             return
 
@@ -828,16 +934,15 @@ class Renderer:
         rx_y = tx_y - panel_height - gap
         y = rx_y - NOISE_PANEL_HEIGHT - gap
 
-        max_noise = max(max(u, d) for u, d in hist) or 1.0
-
+        lo, hi = -10.0, 50.0
         graph_left = x + 4
-        graph_right = x + panel_width - 4
-        graph_width = graph_right - graph_left
+        graph_width = panel_width - 8
         graph_bottom = y + 4
-        graph_top = y + NOISE_PANEL_HEIGHT - 12
-        graph_height = graph_top - graph_bottom
+        graph_height = NOISE_PANEL_HEIGHT - 16
 
-        # Border
+        def to_y(v: float) -> float:
+            return graph_bottom + (min(max(v, lo), hi) - lo) / (hi - lo) * graph_height
+
         glColor3f(*HUD_PANEL_BORDER_COLOR)
         glBegin(GL_LINE_LOOP)
         glVertex2f(x, y)
@@ -846,28 +951,23 @@ class Renderer:
         glVertex2f(x, y + NOISE_PANEL_HEIGHT)
         glEnd()
 
-        # Label + current values
-        self._font.draw(f"N {uplink_noise:.2f}/{downlink_noise:.2f}", x + 4,
-                        y + NOISE_PANEL_HEIGHT - self._font._size - 3,
-                        colour=HUD_TEXT_COLOR)
-
-        # Uplink noise line (TX)
-        glColor3f(*HUD_RAW_SIGNAL_COLOR)
-        glBegin(GL_LINE_STRIP)
-        for i, (u, _) in enumerate(hist):
-            px = graph_left + (i / (len(hist) - 1)) * graph_width
-            py = graph_bottom + (u / max_noise) * graph_height
-            glVertex2f(px, py)
+        # Dead-link threshold
+        glColor3f(0.45, 0.12, 0.1)
+        glBegin(GL_LINES)
+        glVertex2f(graph_left, to_y(HEATMAP_DEAD_SINR))
+        glVertex2f(graph_left + graph_width, to_y(HEATMAP_DEAD_SINR))
         glEnd()
 
-        # Downlink noise line (RX)
-        glColor3f(*HUD_WAVEFORM_COLOR)
-        glBegin(GL_LINE_STRIP)
-        for i, (_, d) in enumerate(hist):
-            px = graph_left + (i / (len(hist) - 1)) * graph_width
-            py = graph_bottom + (d / max_noise) * graph_height
-            glVertex2f(px, py)
-        glEnd()
+        up, down = hist[-1]
+        self._font.draw(f"SINR UP {up:.0f} DN {down:.0f} DB", x + 4,
+                        y + NOISE_PANEL_HEIGHT - self._font._size - 3, colour=HUD_TEXT_COLOR)
+
+        for index, colour in ((0, HUD_RAW_SIGNAL_COLOR), (1, HUD_WAVEFORM_COLOR)):
+            glColor3f(*colour)
+            glBegin(GL_LINE_STRIP)
+            for i, values in enumerate(hist):
+                glVertex2f(graph_left + (i / (len(hist) - 1)) * graph_width, to_y(values[index]))
+            glEnd()
 
     def _draw_minimap(self, jammers: List[Jammer]) -> None:
         uav_pos = self.uav.body.position
@@ -900,31 +1000,46 @@ class Renderer:
         cos_yaw = np.cos(uav_yaw)
         sin_yaw = np.sin(uav_yaw)
 
-        # Jammers
+        # Interference map (same cells as the ground heatmap)
+        if self._heatmap_visible and self._heatmap_cells is not None:
+            centres, rgba = self._heatmap_cells
+            rel = centres - uav_pos[:2]
+            inside = np.all(np.abs(rel) <= extent + HEATMAP_CELL, axis=1)
+            if np.any(inside):
+                pts = np.ascontiguousarray(
+                    np.stack([cx + rel[inside, 0] * scale, cy + rel[inside, 1] * scale], axis=1),
+                    dtype=np.float32)
+                cols = np.ascontiguousarray(rgba[inside] * np.array([1, 1, 1, 1.6], dtype=np.float32))
+                glEnable(GL_BLEND)
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                glPointSize(max(1.0, HEATMAP_CELL * scale))
+                glEnableClientState(GL_VERTEX_ARRAY)
+                glEnableClientState(GL_COLOR_ARRAY)
+                glVertexPointer(2, GL_FLOAT, 0, pts)
+                glColorPointer(4, GL_FLOAT, 0, cols)
+                glDrawArrays(GL_POINTS, 0, len(pts))
+                glDisableClientState(GL_COLOR_ARRAY)
+                glDisableClientState(GL_VERTEX_ARRAY)
+                glDisable(GL_BLEND)
+
+        # Jammers (colour = kind)
+        glPointSize(6.0)
+        glBegin(GL_POINTS)
         for jammer in jammers:
-            dx = jammer.position[0] - uav_pos[0]
-            dy = jammer.position[1] - uav_pos[1]
-            jx = cx + dx * scale
-            jy = cy + dy * scale
+            glColor3f(*JAMMER_KIND_COLORS.get(jammer.kind, JAMMER_BODY_COLOR))
+            glVertex2f(cx + (jammer.position[0] - uav_pos[0]) * scale,
+                       cy + (jammer.position[1] - uav_pos[1]) * scale)
+        glEnd()
 
-            # Range circle
-            r_px = jammer.radius * scale
-            num_seg = 36
-            glColor3f(*JAMMER_CIRCLE_COLOR)
-            glBegin(GL_LINES)
-            for i in range(0, num_seg, 2):
-                a = 2.0 * np.pi * i / num_seg
-                b = 2.0 * np.pi * (i + 1) / num_seg
-                glVertex2f(jx + r_px * np.cos(a), jy + r_px * np.sin(a))
-                glVertex2f(jx + r_px * np.cos(b), jy + r_px * np.sin(b))
-            glEnd()
-
-            # Jammer dot
-            glColor3f(*JAMMER_BODY_COLOR)
-            glPointSize(4.0)
-            glBegin(GL_POINTS)
-            glVertex2f(jx, jy)
-            glEnd()
+        # Ground station
+        gx = cx + (self.world.ground_station[0] - uav_pos[0]) * scale
+        gy = cy + (self.world.ground_station[1] - uav_pos[1]) * scale
+        glColor3f(*GROUND_STATION_COLOR)
+        glBegin(GL_LINE_LOOP)
+        glVertex2f(gx, gy + 5.0)
+        glVertex2f(gx - 4.0, gy - 3.0)
+        glVertex2f(gx + 4.0, gy - 3.0)
+        glEnd()
 
         glPointSize(1.0)
 
@@ -1012,6 +1127,16 @@ class Renderer:
         glDisable(GL_BLEND)
 
         f.draw(text, cx - tw / 2.0, cy - f._size / 2.0, colour=(1.0, 1.0, 0.5))
+
+def _sinr_colour(sinr_db: float) -> Tuple[float, float, float]:
+    if sinr_db >= HEATMAP_GOOD_SINR:
+        return (0.3, 1.0, 0.4)
+    if sinr_db >= HEATMAP_MARGINAL_SINR:
+        return (1.0, 0.85, 0.1)
+    if sinr_db >= HEATMAP_DEAD_SINR:
+        return (1.0, 0.5, 0.1)
+    return (1.0, 0.15, 0.1)
+
 
 def _waveform_segments(
     transmissions: Tuple[Tuple[float, bytes], ...],

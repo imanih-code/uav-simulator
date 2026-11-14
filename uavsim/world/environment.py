@@ -42,6 +42,9 @@ class FlatGroundPlane:
 class World:
     ground: FlatGroundPlane = field(default_factory=FlatGroundPlane)
     extent_half: float = WORLD_EXTENT_HALF
+    # The pilot's ground station (RC transmitter + telemetry receiver):
+    # a few metres behind the take-off point, antenna at head height.
+    ground_station: np.ndarray = field(default_factory=lambda: np.array([-4.0, 0.0, 1.5]))
 
 
 def apply_world_bounds(body: RigidBody, extent_half: float) -> None:

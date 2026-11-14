@@ -71,6 +71,7 @@ class InputState:
     cycle_mode: bool = False
     cycle_failsafe: bool = False
     toggle_tx: bool = False
+    toggle_heatmap: bool = False
 
     flight_keys: Set[str] = field(default_factory=set)
     gamepad_axes: Optional[Tuple[float, float, float, float]] = None
@@ -136,6 +137,8 @@ class Window:
                     state.reset = True
                 elif event.key == pygame.K_p:
                     state.toggle_pause = True
+                elif event.key == pygame.K_h:
+                    state.toggle_heatmap = True
                 elif event.key == pygame.K_f:
                     state.toggle_dssc = True
                 elif event.key == pygame.K_F12:

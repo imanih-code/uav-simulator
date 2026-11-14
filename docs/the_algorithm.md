@@ -79,6 +79,38 @@ the renderer runs at up to 60 FPS. All protocol timing (RC rate, LQ
 windows, failsafe stages) uses simulation time, so pausing never trips a
 failsafe and results don't depend on frame rate.
 
+## RF Environment (link budgets)
+
+**Files**: `uavsim/world/rf.py`, `uavsim/entities/jammer.py`
+
+Every frame, for each direction:
+
+```
+PL(d, h)   = 40.2 dB + 10·n(h)·log10(d)      (2.44 GHz, 1 m reference)
+n(h)       = 2.0 + 0.9·max(0, 1 - h_max/30 m)  (h_max = higher antenna of the pair)
+S          = P_tx + G_tx + G_rx - PL(d_link)
+I          = Σ_j (EIRP_j + G_rx - PL(d_j))    summed in mW, only jammers that are on
+SINR       = S - 10·log10(N + I)              N = -108 dBm
+noise_voltage = 10^(-SINR/20)                 -> GnuRadioChannel / LoopbackChannel
+```
+
+| Link | Transmitter | Receiver (where interference counts) |
+|---|---|---|
+| Uplink (RC) | ground station, 27 dBm | UAV |
+| Downlink (telemetry) | UAV, 20 dBm | ground station |
+
+Jammer timing: BARRAGE always on; PULSED on for 30% of 0.25 s; SWEPT on
+our channel for 12% of 0.6 s (72 ms). Bursts shorter than the 0.1 s
+RX-loss timeout lower LQ without starting a failsafe.
+
+Calibration against the link model (11-byte RC frame): ~90% delivered at
+11 dB SINR, ~50% at 9 dB, ~10% at 7 dB. The 174-byte telemetry packet
+needs ~1.5 dB more for the same delivery rate.
+
+Not modelled yet: fading/shadowing, terrain blockage, narrowband or
+reactive jammers (they need the channel itself to change, not just its
+noise level), antenna patterns.
+
 ## GNU Radio in Isolated Subprocess
 
 **File**: `uavsim/comms/gnuradio_link.py`

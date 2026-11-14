@@ -1,26 +1,76 @@
+"""Jammers: ground-based transmitters that raise the interference floor.
+
+A jammer no longer has a hard "range circle". It radiates a power (dBm)
+from an antenna a couple of metres above the ground, and the RF model
+(`uavsim.world.rf`) works out how much of it reaches each receiver --
+the UAV for the uplink, the ground station for the downlink -- and adds
+it to the noise there. Whether that kills a link depends on geometry:
+the jammer's distance to the receiver *versus* the wanted transmitter's.
+
+Three temporal behaviours are modelled (all as in-band noise, since the
+radio channel is an AWGN channel):
+
+* BARRAGE -- always on.
+* PULSED  -- on for ``duty`` of every ``period`` seconds.
+* SWEPT   -- sweeps across a wide band and only sits on our channel for
+             ``duty * period`` seconds once per sweep.
+
+Their interaction with the failsafe timers is the interesting part: a
+jammer whose "on" bursts are shorter than the RX-loss timeout (0.1 s)
+degrades link quality without ever triggering a failsafe.
+"""
 from __future__ import annotations
 
-import time
+import random
 from dataclasses import dataclass, field
+from enum import Enum
 
 import numpy as np
 
 
+class JammerKind(Enum):
+    BARRAGE = "BARRAGE"
+    PULSED = "PULSED"
+    SWEPT = "SWEPT"
+
+
+# Default timing per kind: (period s, duty fraction)
+_DEFAULT_TIMING = {
+    JammerKind.BARRAGE: (1.0, 1.0),
+    JammerKind.PULSED: (0.25, 0.3),
+    JammerKind.SWEPT: (0.6, 0.12),
+}
+
+
 @dataclass
 class Jammer:
-    position: np.ndarray = field(default_factory=lambda: np.zeros(3))
-    radius: float = 80.0
-    center_noise: float = 0.71
-    edge_noise: float = 0.15
-    cylinder_height: float = 0.5
-    cylinder_radius: float = 0.12
+    position: np.ndarray = field(default_factory=lambda: np.zeros(3))  # ground point
+    kind: JammerKind = JammerKind.BARRAGE
+    power_dbm: float = 20.0         # radiated power while on (100 mW)
+    antenna_gain_dbi: float = 2.0
+    antenna_height: float = 2.0     # m above `position`
+    period: float = 1.0             # s
+    duty: float = 1.0               # fraction of the period spent on our channel
+    phase: float = 0.0              # s, offset so jammers are not synchronised
 
-    def noise_at(self, pos: np.ndarray) -> float:
-        if not self.is_in_range(pos):
-            return 0.0
-        t = np.linalg.norm(pos - self.position) / self.radius  # 0 at center, 1 at edge
-        # Linear interpolation: center_noise at t=0, edge_noise at t=1
-        return self.center_noise + (self.edge_noise - self.center_noise) * t
+    @staticmethod
+    def make(position: np.ndarray, kind: JammerKind, power_dbm: float = 20.0,
+             phase: float = None) -> "Jammer":
+        period, duty = _DEFAULT_TIMING[kind]
+        if phase is None:
+            phase = random.uniform(0.0, period)
+        return Jammer(position=np.asarray(position, dtype=float), kind=kind,
+                      power_dbm=power_dbm, period=period, duty=duty, phase=phase)
 
-    def is_in_range(self, pos: np.ndarray) -> bool:
-        return np.linalg.norm(pos - self.position) <= self.radius
+    @property
+    def antenna_position(self) -> np.ndarray:
+        return self.position + np.array([0.0, 0.0, self.antenna_height])
+
+    @property
+    def eirp_dbm(self) -> float:
+        return self.power_dbm + self.antenna_gain_dbi
+
+    def is_on(self, t: float) -> bool:
+        if self.duty >= 1.0:
+            return True
+        return ((t + self.phase) % self.period) < self.duty * self.period

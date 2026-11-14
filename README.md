@@ -152,6 +152,7 @@ ideal GNSS); GNSS jamming is not modelled yet.
 | Mouse        | Rotate view (orbit in FOLLOW, look around in FREE) |
 | `V`          | Toggle between FOLLOW (chases the UAV) and FREE (spectator) |
 | `F`          | Toggle chaotic DSSS anti-jamming (N=8) on/off |
+| `H`          | Toggle the uplink interference map painted on the ground |
 | `P`          | Pause / unpause (camera keeps working while paused) |
 | `BACKSPACE`  | Reset UAV + randomly reposition all jammers |
 | `F12`        | Save screenshot to `assets/images/` |
@@ -179,12 +180,55 @@ grey and freeze (`TLM LOST`), just like a real ground station.
 - **Banner** — `DISARMED`, `RX LOSS`, `FAILSAFE RTH/HOLD/LAND/DROP`,
   `TLM LOST`, `TX OFF`.
 - **Motor bars** — the four motor commands from the flight controller.
-- **Minimap** — top-down view around the UAV with jammers and the home
-  point (cyan square). In the 3D view the home point is a cyan `H` and a
-  dashed drop line marks the UAV's position over the ground.
-- **TX / RX scopes, noise timeline, DSSS correlation meter** — the real
-  bits and waveform of each burst, noise voltage on each link, and DSSS
-  correlation quality when anti-jamming is on (`F`).
+- **Minimap** — top-down view around the UAV: interference map, jammers
+  (coloured by type), ground station (triangle) and home point (square).
+  In the 3D view the home point is a cyan `H` and a dashed drop line marks
+  the UAV's position over the ground.
+- **TX / RX scopes, DSSS correlation meter** — the real bits and waveform
+  of each burst, and DSSS correlation quality when anti-jamming is on (`F`).
+- **SINR timeline** (simulation instrument, not part of the OSD) — uplink
+  and downlink SINR in dB over time, with the 7 dB "link dead" line.
+
+## Jammers and the radio environment
+
+The pilot's **ground station** (tripod near the take-off point) holds the
+RC transmitter and the telemetry receiver. Every frame the simulator
+computes a link budget for each direction (`uavsim/world/rf.py`):
+
+    received power  = Tx power + antenna gains - path loss(distance, heights)
+    SINR            = received power - (noise floor + Σ jammer power at the receiver)
+
+- **Uplink** (control) is received by the UAV; **downlink** (telemetry) by
+  the ground station. A jammer near the drone kills control while the
+  ground station still hears telemetry, and a jammer near the pilot does
+  the opposite.
+- **Distance matters on both sides**: what counts is the jammer's distance
+  to the receiver *relative* to the wanted transmitter's. The further you
+  fly from the ground station, the larger every jammer's zone becomes.
+- **Height matters**: path loss uses a log-distance model whose exponent
+  goes from ~2 (line of sight, an antenna above ~30 m) to ~2.9 (both near
+  the ground). Climbing usually improves the link — which is why RTH
+  climbing first helps.
+- **Jammer powers add up** (in mW), they don't just take the maximum.
+
+Defaults: 2.44 GHz, 500 mW ground station, 100 mW telemetry radio,
+-108 dBm noise floor, jammers between 4 and 25 mW. With the calibrated
+link model, RC frames get through ~90% of the time at 11 dB SINR and
+~10% at 7 dB.
+
+**Jammer types** (colour of the antenna light; it is lit while transmitting):
+
+| Type | Colour | Behaviour | Effect on the failsafe |
+|---|---|---|---|
+| BARRAGE | red | always on | sustained loss → RTH/HOLD/LAND/DROP |
+| PULSED | magenta | on 30% of every 0.25 s | LQ drops to ~70%, bursts (75 ms) shorter than the 100 ms RX-loss timeout |
+| SWEPT | orange | crosses our channel for 72 ms every 0.6 s | small LQ dips, never a failsafe on its own |
+
+**Interference map** (`H`): the ground and minimap are painted with the
+uplink SINR a UAV would get at its *current altitude* if every jammer were
+on (worst case): transparent above 14 dB, yellow → orange → red down to
+7 dB and below. The line from the ground station to the UAV uses the same
+colours and turns dashed when the control link is dead.
 
 ## Communication: Real GNU Radio, not an in-memory queue
 
@@ -210,9 +254,10 @@ send(bytes) -> [preamble + access code + payload + CRC32 + tail padding]
 
 Real consequences, not cosmetic:
 
-- **Packets can be lost or corrupted**: with low noise (default
-  `noise_voltage=0.05`) almost everything arrives intact, but it's a real
-  radio, not a guarantee. If the access code doesn't sync or CRC32 fails,
+- **Packets can be lost or corrupted**: the channel's `noise_voltage` is
+  set every frame from the link budget (`noise = 10^(-SINR/20)` on a
+  unit-power signal). With a clean sky almost everything arrives intact,
+  but it's a real radio, not a guarantee. If the access code doesn't sync or CRC32 fails,
   the packet is dropped — corrupted data is never delivered to the app
   (`UAV`/`Operator` silently ignore corrupt packets, they don't crash).
 - **Delivery is asynchronous with real jitter**: each burst (encode +
@@ -247,21 +292,23 @@ uavsim/
 │   ├── battery.py         Battery: drains based on motor load
 │   └── rigid_body.py      RigidBody: 6DOF (numpy + scipy Rotation) + linear/quadratic drag
 ├── world/
-│   └── environment.py     Flat ground, ground contact (gear sits flat), world bounds
+│   ├── environment.py     Flat ground, ground station position, ground contact, world bounds
+│   └── rf.py              Link budgets: path loss, jammer interference, SINR per link,
+│                          SINR -> channel noise, SINR grid for the interference map
 ├── entities/
 │   ├── uav.py             UAV: frames in -> arming -> failsafe -> flight controller
 │   │                      -> motors -> physics -> telemetry, at a fixed 250 Hz tick
 │   ├── operator.py        UAVOperator: keyboard/gamepad -> sticks -> RC frames at 50 Hz;
 │   │                      ground-station telemetry + downlink LQ
-│   └── jammer.py          Jammer: noise level vs distance
+│   └── jammer.py          Jammer: power, antenna, type (BARRAGE / PULSED / SWEPT) and timing
 ├── hud/
 │   └── hud.py             HUDSnapshot from telemetry + transmitter state + link stats
 └── rendering/
     ├── window.py          Window + keyboard/gamepad/mouse input via pygame
     ├── camera.py          Camera: FOLLOW (orbit) and FREE (spectator) modes
     ├── ttf_font.py        TrueType texture atlas font renderer
-    └── renderer.py        Terrain, UAV, jammers, home point, full HUD
-tests/                     pytest: protocol, flight modes, failsafe, link model
+    └── renderer.py        Terrain, interference map, UAV, jammers, ground station, HUD
+tests/                     pytest: protocol, flight modes, failsafe, link model, RF model
 ```
 
 Physics and control run at a **fixed 250 Hz in simulation time**
@@ -284,8 +331,9 @@ doesn't "go crazy" with it.
 
 ### Design decisions
 
-- **Real bit-level protocol**: `Command.encode()`/`decode()` pack each order
-  into a real 1-byte packet, and the UAV decodes it via `CommGatewayInput`.
+- **Real bit-level protocol**: `RCPacket.encode()`/`decode()` pack the
+  sticks and switches into a real 11-byte frame, and the UAV decodes it
+  via `CommGatewayInput`.
 - **Telemetry with `struct`**: binary pack/unpack using the standard library.
 - **Physics with `numpy` + `scipy.spatial.transform.Rotation`**: scipy
   quaternions instead of hand-rolled rotation matrices.
@@ -313,15 +361,12 @@ following papers (PDFs available in `docs/`):
 
 ## Next steps (not yet implemented)
 
-- Physical link budget: operator position, path loss, jammer power summed
-  (not max), uplink and downlink jammed independently.
-- More jammer types (tone, swept, pulsed, reactive) and GNSS jamming.
+- Narrowband (tone) and reactive jammers — they need the radio channel
+  itself to change, not just its noise level — and GNSS jamming/spoofing.
+- Fading / shadowing, and terrain that blocks line of sight.
 - Better mitigation: spread the sync word, soft-decision despreading,
   per-packet keyed sequences, FEC + interleaving, compact telemetry,
   adaptive spreading, frequency hopping.
-
-- ~~Jammers~~ ✅ done — orange-red cylinders with dotted range circles that
-  raise the noise floor on both radio links. Randomly placed at startup,
-  repositioned on reset. The minimap shows their positions and range.
+- Headless batch runs that output link-quality curves vs J/S.
 - Non-flat terrain.
 - More realistic ground contact (real normal force instead of clamping).

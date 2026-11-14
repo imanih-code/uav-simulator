@@ -10,7 +10,8 @@ from uavsim.comms.loopback_link import LoopbackChannel  # noqa: E402
 from uavsim.control.rc import FlightMode, Sticks  # noqa: E402
 from uavsim.entities.operator import PilotInput, UAVOperator  # noqa: E402
 from uavsim.entities.uav import UAV, UAVConfig  # noqa: E402
-from uavsim.world.environment import FlatGroundPlane  # noqa: E402
+from uavsim.world.environment import FlatGroundPlane, World  # noqa: E402
+from uavsim.world.rf import RFEnvironment, apply_to_links  # noqa: E402
 
 DT = 1.0 / 250.0
 
@@ -18,7 +19,14 @@ DT = 1.0 / 250.0
 class Sim:
     """Headless operator + UAV over a clean loopback radio, in sim time."""
 
-    def __init__(self, mode: FlightMode = FlightMode.ALT_HOLD, seed: int = 1) -> None:
+    def __init__(self, mode: FlightMode = FlightMode.ALT_HOLD, seed: int = 1,
+                 jammers=None) -> None:
+        # Optional RF scene: when jammers are given, link noise follows the
+        # physical link budget every step (like main.py does every frame).
+        self.jammers = jammers
+        self.rf = RFEnvironment() if jammers is not None else None
+        self.ground_station = World().ground_station
+        self.budget = None
         self.uplink = LoopbackChannel(noise_voltage=0.0, latency=0.0, seed=seed)
         self.downlink = LoopbackChannel(noise_voltage=0.0, latency=0.0, seed=seed + 1)
         self.uav = UAV(
@@ -39,6 +47,10 @@ class Sim:
                 self.op.sticks = sticks
             else:
                 self.op.handle_input(PilotInput(keys=set(keys)), DT)
+            if self.rf is not None:
+                self.budget = self.rf.evaluate(self.uav.body.position, self.ground_station,
+                                               self.jammers, self.t)
+                apply_to_links(self.budget, self.uplink, self.downlink)
             self.op.tick(self.t)
             self.uav.step(DT, self.t)
             self.op.poll_telemetry(self.t)

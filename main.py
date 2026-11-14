@@ -17,6 +17,7 @@ Simulation
 ----------
 Arrow keys / mouse  camera;  V  FOLLOW / FREE camera
 F              chaotic DSSS anti-jamming (N=8) on/off
+H              uplink interference map on the ground on/off
 P              pause;  BACKSPACE  reset UAV + reposition jammers
 F12            screenshot;  ESC  quit
 
@@ -36,7 +37,7 @@ import pygame
 from OpenGL.GL import GL_BACK, GL_RGB, GL_UNSIGNED_BYTE, glReadPixels, glReadBuffer
 
 from uavsim.comms.gateway import CommGatewayInput, CommGatewayOutput
-from uavsim.entities.jammer import Jammer
+from uavsim.entities.jammer import Jammer, JammerKind
 from uavsim.entities.operator import PilotInput, UAVOperator
 from uavsim.entities.uav import UAV, UAVConfig
 from uavsim.hud.hud import HUD
@@ -44,6 +45,7 @@ from uavsim.rendering.camera import Camera
 from uavsim.rendering.renderer import Renderer
 from uavsim.rendering.window import Window
 from uavsim.world.environment import World
+from uavsim.world.rf import LinkBudget, RFEnvironment, apply_to_links
 
 TARGET_FPS = 60
 PHYSICS_HZ = 250
@@ -51,6 +53,12 @@ PHYSICS_DT = 1.0 / PHYSICS_HZ
 MAX_STEPS_PER_FRAME = 25  # never try to catch up more than 0.1 s of sim time
 _BASE_NOISE = 0.005
 _JAMMER_COUNT = 6
+_JAMMER_MIN_DISTANCE_FROM_HOME = 90.0   # m
+_JAMMER_MIN_SEPARATION = 60.0           # m
+# Radiated power drawn per jammer (4-25 mW). With the 500 mW ground station
+# this leaves danger zones around each jammer instead of jamming everything.
+_JAMMER_POWER_RANGE_DBM = (6.0, 14.0)
+_JAMMER_KIND_WEIGHTS = {JammerKind.BARRAGE: 3, JammerKind.PULSED: 2, JammerKind.SWEPT: 2}
 
 
 def make_link(backend: str, noise: float):
@@ -95,40 +103,40 @@ def build_simulation(world: World, backend: str):
     return command_link, telemetry_link, uav, operator, hud
 
 
-def update_jammer_noise(jammers: List[Jammer], uav: UAV, command_link, telemetry_link) -> None:
-    noise = _BASE_NOISE
-    for jammer in jammers:
-        noise = max(noise, jammer.noise_at(uav.body.position))
-    if noise != command_link.noise_voltage:
-        command_link.noise_voltage = noise
-        telemetry_link.noise_voltage = noise
+def update_radio(rf: RFEnvironment, world: World, jammers: List[Jammer], uav: UAV,
+                 command_link, telemetry_link, sim_time: float) -> LinkBudget:
+    """Recompute both link budgets for the current geometry and push them
+    into the radio channels as noise levels."""
+    budget = rf.evaluate(uav.body.position, world.ground_station, jammers, sim_time)
+    apply_to_links(budget, command_link, telemetry_link)
+    return budget
 
 
-def place_random_jammers(
-    jammers: List[Jammer], count: int, extent_half: float, uav_pos: np.ndarray, ground_z: float
-) -> None:
-    jammer_radius = Jammer().radius
-    exclusion = jammer_radius * 1.5
+def place_random_jammers(jammers: List[Jammer], count: int, extent_half: float,
+                         home: np.ndarray, ground_z: float) -> None:
+    kinds = list(_JAMMER_KIND_WEIGHTS)
+    weights = list(_JAMMER_KIND_WEIGHTS.values())
     margin = 5.0
-    placed = 0
-    for _ in range(count * 20):
-        if placed >= count:
+    for _ in range(count * 50):
+        if len(jammers) >= count:
             break
-        x = random.uniform(-extent_half + margin, extent_half - margin)
-        y = random.uniform(-extent_half + margin, extent_half - margin)
-        pos = np.array([x, y, ground_z])
-        if np.linalg.norm(pos[:2] - uav_pos[:2]) < exclusion:
+        pos = np.array([
+            random.uniform(-extent_half + margin, extent_half - margin),
+            random.uniform(-extent_half + margin, extent_half - margin),
+            ground_z,
+        ])
+        if np.linalg.norm(pos[:2] - home[:2]) < _JAMMER_MIN_DISTANCE_FROM_HOME:
             continue
-        if any(np.linalg.norm(pos[:2] - j.position[:2]) < jammer_radius * 2 for j in jammers):
+        if any(np.linalg.norm(pos[:2] - j.position[:2]) < _JAMMER_MIN_SEPARATION for j in jammers):
             continue
-        jammers.append(Jammer(position=pos))
-        placed += 1
+        jammers.append(Jammer.make(pos, random.choices(kinds, weights)[0],
+                                   random.uniform(*_JAMMER_POWER_RANGE_DBM)))
 
 
-def reset_jammers(jammers: List[Jammer], extent_half: float, uav_pos: np.ndarray,
+def reset_jammers(jammers: List[Jammer], extent_half: float, home: np.ndarray,
                   ground_z: float) -> None:
     jammers.clear()
-    place_random_jammers(jammers, _JAMMER_COUNT, extent_half, uav_pos, ground_z)
+    place_random_jammers(jammers, _JAMMER_COUNT, extent_half, home, ground_z)
 
 
 def save_screenshot(window: Window, index: int) -> None:
@@ -149,6 +157,7 @@ def main() -> None:
     world = World()
     command_link, telemetry_link, uav, operator, hud = build_simulation(world, backend)
     camera = Camera()
+    rf = RFEnvironment()
     window = Window()
     renderer = Renderer(world, uav, window.width, window.height)
 
@@ -156,11 +165,13 @@ def main() -> None:
     reset_jammers(jammers, world.extent_half, uav.body.position, world.ground.ground_z)
 
     paused = False
+    show_heatmap = True
     screenshot_count = 0
     os.makedirs("assets/images", exist_ok=True)
 
     sim_time = 0.0
     accumulator = 0.0
+    budget = update_radio(rf, world, jammers, uav, command_link, telemetry_link, sim_time)
     previous_time = time.perf_counter()
     try:
         while True:
@@ -188,6 +199,8 @@ def main() -> None:
                 reset_jammers(jammers, world.extent_half, uav.body.position, world.ground.ground_z)
                 sim_time = 0.0
                 accumulator = 0.0
+            if input_state.toggle_heatmap:
+                show_heatmap = not show_heatmap
             if input_state.toggle_dssc:
                 new_n = 0 if command_link.dssc_N > 0 else 8
                 for link in (command_link, telemetry_link):
@@ -212,7 +225,8 @@ def main() -> None:
                     ),
                     frame_dt,
                 )
-                update_jammer_noise(jammers, uav, command_link, telemetry_link)
+                budget = update_radio(rf, world, jammers, uav, command_link, telemetry_link,
+                                      sim_time)
                 accumulator += frame_dt
                 steps = 0
                 while accumulator >= PHYSICS_DT and steps < MAX_STEPS_PER_FRAME:
@@ -235,9 +249,9 @@ def main() -> None:
 
             window.begin_frame()
             eye, target = camera.eye_and_target(uav.body.position)
-            renderer.draw_scene(eye, target, jammers)
-            renderer.draw_hud(snapshot, paused, jammers,
-                              command_link.noise_voltage, telemetry_link.noise_voltage,
+            renderer.draw_scene(eye, target, jammers, sim_time, budget,
+                                heatmap_rf=rf if show_heatmap else None)
+            renderer.draw_hud(snapshot, paused, jammers, budget,
                               dssc_N=command_link.dssc_N, link_backend=backend,
                               gamepad=window.gamepad_name)
             if input_state.screenshot:
