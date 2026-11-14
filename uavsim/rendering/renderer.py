@@ -24,6 +24,8 @@ from OpenGL.GL import (
     glEnableClientState,
     glVertexPointer,
     GL_DEPTH_TEST,
+    GL_FOG,
+    GL_LIGHTING,
     GL_LINE_LOOP,
     GL_LINE_STRIP,
     GL_LINES,
@@ -61,6 +63,15 @@ from OpenGL.GLU import gluLookAt, gluProject
 from uavsim.entities.jammer import Jammer, JammerKind
 from uavsim.entities.uav import UAV
 from uavsim.hud.hud import SIGNAL_WINDOW_SECONDS, HUDSnapshot
+from uavsim.rendering.scene3d import (
+    TerrainMesh,
+    UavModel,
+    draw_shadow,
+    draw_sky,
+    draw_tower,
+    enable_fog,
+    set_sun,
+)
 from uavsim.rendering.ttf_font import TTFFont
 from uavsim.world.environment import WORLD_EXTENT_HALF, World
 from uavsim.world.rf import LinkBudget, RFEnvironment
@@ -152,6 +163,9 @@ class Renderer:
         self._heatmap_cells = None  # (centres_xy, rgba) for the minimap
         self._heatmap_visible = False
         self._margin = 0.0
+        self._terrain_mesh = TerrainMesh(world.ground, world.extent_half)
+        self._uav_model = UavModel(uav)
+        self._last_sim_time = None
         self._font = TTFFont("assets/fonts/7-segment.ttf", size=14)
         self._pause_font = TTFFont("assets/fonts/7-segment.ttf", size=28)
 
@@ -163,30 +177,59 @@ class Renderer:
         (measured by uavsim.experiments.link_curves); shifts every colour
         threshold so the map shows where *this* radio loses the link."""
         self._margin = link_margin_db
+        dt = 0.0 if self._last_sim_time is None else min(max(sim_time - self._last_sim_time, 0.0), 0.1)
+        self._last_sim_time = sim_time
+
+        draw_sky()
         gluLookAt(
             camera_eye[0], camera_eye[1], camera_eye[2],
             camera_target[0], camera_target[1], camera_target[2],
             0.0, 0.0, 1.0,
         )
+        set_sun()
+        enable_fog()
+        self._terrain_mesh.draw()
         self._heatmap_visible = heatmap_rf is not None
         if heatmap_rf is not None:
             self._draw_heatmap(heatmap_rf, jammers, sim_time)
-        self._draw_ground()
         self._draw_home_marker()
         self._draw_ground_station()
         if budget is not None:
             self._draw_link_line(budget)
         self._draw_ground_shadow()
-        motor_points = self._draw_uav(camera_eye)
+        motor_points = self._draw_uav(dt)
         self._project_motor_labels(motor_points)
         for jammer in jammers:
             self._draw_jammer(jammer, sim_time)
+
+    def _draw_hud_backdrops(self) -> None:
+        """Translucent dark panels so HUD text stays readable over a bright sky."""
+        w, h = self.hud_width, self.hud_height
+        rects = (
+            (6, h - 452, 186, h - 6),                    # flight data, status, sticks
+            (w - 320, h - 312, w - 6, h - 6),            # scopes, SINR, DSSS bar
+            (6, 6, 150, 168),                            # motor bars
+            (w - MINIMAP_SIZE - MINIMAP_MARGIN - 4, MINIMAP_MARGIN + MINIMAP_SIZE + 2,
+             w - MINIMAP_MARGIN + 4, MINIMAP_MARGIN + MINIMAP_SIZE + 46),  # minimap labels
+        )
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glColor4f(0.02, 0.03, 0.05, 0.55)
+        for x0, y0, x1, y1 in rects:
+            glBegin(GL_TRIANGLE_STRIP)
+            glVertex2f(x0, y0)
+            glVertex2f(x1, y0)
+            glVertex2f(x0, y1)
+            glVertex2f(x1, y1)
+            glEnd()
+        glDisable(GL_BLEND)
 
     def draw_hud(self, snapshot: HUDSnapshot, paused: bool = False,
                  jammers: List[Jammer] = (), budget: LinkBudget = None,
                  dssc_N: int = 0, link_backend: str = "", gamepad: str = "",
                  phy_label: str = "") -> None:
         self._begin_hud_overlay()
+        self._draw_hud_backdrops()
         self._draw_motor_labels()
         self._draw_telemetry_readout(snapshot)
         self._draw_dssc_indicator(dssc_N,
@@ -214,37 +257,6 @@ class Renderer:
         self._end_hud_overlay()
 
     # -- world ---------------------------------------------------------------
-    def _draw_ground(self) -> None:
-        ground_z = self.world.ground.ground_z
-        glBegin(GL_LINES)
-
-        # Minor grid lines (every 1 unit)
-        glColor3f(*GROUND_COLOR)
-        for i in range(-GROUND_GRID_SPAN, GROUND_GRID_SPAN + 1):
-            if i % GROUND_MAJOR_STEP == 0:
-                continue
-            glVertex3f(i, -GROUND_GRID_SPAN, ground_z)
-            glVertex3f(i, GROUND_GRID_SPAN, ground_z)
-            glVertex3f(-GROUND_GRID_SPAN, i, ground_z)
-            glVertex3f(GROUND_GRID_SPAN, i, ground_z)
-
-        # Major grid lines (every GROUND_MAJOR_STEP units)
-        glColor3f(*GROUND_MAJOR_COLOR)
-        for i in range(-GROUND_GRID_SPAN, GROUND_GRID_SPAN + 1, GROUND_MAJOR_STEP):
-            glVertex3f(i, -GROUND_GRID_SPAN, ground_z)
-            glVertex3f(i, GROUND_GRID_SPAN, ground_z)
-            glVertex3f(-GROUND_GRID_SPAN, i, ground_z)
-            glVertex3f(GROUND_GRID_SPAN, i, ground_z)
-
-        # X axis (red tint)
-        glColor3f(*GROUND_AXIS_COLOR)
-        glVertex3f(-GROUND_GRID_SPAN, 0.0, ground_z)
-        glVertex3f(GROUND_GRID_SPAN, 0.0, ground_z)
-        glVertex3f(0.0, -GROUND_GRID_SPAN, ground_z)
-        glVertex3f(0.0, GROUND_GRID_SPAN, ground_z)
-
-        glEnd()
-
     def _draw_heatmap(self, rf: RFEnvironment, jammers: List[Jammer], t: float) -> None:
         """Uplink SINR a UAV would get at its current altitude, painted on the
         ground (worst case: every jammer on). Transparent where the link is
@@ -290,20 +302,19 @@ class Renderer:
         rgba = np.concatenate([rgb, alpha[:, None]], axis=1).astype(np.float32)
         self._heatmap_cells = (np.stack([sx, sy], axis=1), rgba)
 
-        z = self.world.ground.ground_z - 0.02
         h = c / 2.0
         corners = np.array([[-h, -h], [h, -h], [h, h], [-h, h]])
         verts = np.empty((len(sx), 4, 3), dtype=np.float32)
         verts[:, :, 0] = sx[:, None] + corners[None, :, 0]
         verts[:, :, 1] = sy[:, None] + corners[None, :, 1]
-        verts[:, :, 2] = z
+        verts[:, :, 2] = self.world.ground.height_at(verts[:, :, 0], verts[:, :, 1]) + 0.12
         self._heatmap_verts = np.ascontiguousarray(verts.reshape(-1, 3))
         self._heatmap_cols = np.ascontiguousarray(np.repeat(rgba, 4, axis=0))
 
     def _draw_ground_station(self) -> None:
         """Pilot's ground station: tripod + antenna."""
         gs = self.world.ground_station
-        z0 = self.world.ground.ground_z
+        z0 = float(self.world.ground.height_at(gs[0], gs[1]))
         top = np.array([gs[0], gs[1], gs[2] - 0.3])
         glColor3f(*GROUND_STATION_COLOR)
         glBegin(GL_LINES)
@@ -346,7 +357,7 @@ class Renderer:
     def _draw_home_marker(self) -> None:
         """'H' on the ground where the UAV was armed (RTH destination)."""
         hx, hy = float(self.uav.home[0]), float(self.uav.home[1])
-        z = self.world.ground.ground_z + 0.01
+        z = float(self.world.ground.height_at(hx, hy)) + 0.05
         s = 0.6
         glColor3f(*HOME_COLOR)
         glBegin(GL_LINES)
@@ -361,158 +372,34 @@ class Renderer:
         glEnd()
 
     def _draw_ground_shadow(self) -> None:
-        """Drop line + footprint under the UAV: the main depth cue for a pilot."""
+        """Shadow blob + dashed drop line: the main depth cues for a pilot."""
         c = self.uav.body.position
-        z = self.world.ground.ground_z + 0.01
-        if c[2] - z < 0.05:
+        z = float(self.world.ground.height_at(c[0], c[1]))
+        height = float(c[2]) - z
+        draw_shadow(float(c[0]), float(c[1]), z, height)
+        if height < 0.3:
             return
         glColor3f(*SHADOW_COLOR)
         glBegin(GL_LINES)
         dash, gap = 0.25, 0.25
-        h = z
+        h = z + 0.05
         while h < c[2]:
             glVertex3f(c[0], c[1], h)
             glVertex3f(c[0], c[1], min(h + dash, c[2]))
             h += dash + gap
-        for p in self.uav.motor_world_positions():
-            glVertex3f(c[0], c[1], z)
-            glVertex3f(p[0], p[1], z)
         glEnd()
 
-    def _draw_uav(self, camera_eye: np.ndarray) -> List[np.ndarray]:
-        center = self.uav.body.position
-        motor_points = self.uav.motor_world_positions()
-        num_segments = 24
-        radius = 0.10
-
-        # -- Camera-facing billboard circle (always faces the viewer) --
-        view_dir = camera_eye - center
-        view_dist = np.linalg.norm(view_dir)
-        if view_dist < 1e-8:
-            view_dir = np.array([0.0, 0.0, 1.0])
-        else:
-            view_dir /= view_dist
-        ref_up = np.array([0.0, 0.0, 1.0])
-        if abs(np.dot(view_dir, ref_up)) > 0.99:
-            ref_up = np.array([0.0, 1.0, 0.0])
-        right = np.cross(view_dir, ref_up)
-        right /= np.linalg.norm(right)
-        up_perp = np.cross(right, view_dir)
-        up_perp /= np.linalg.norm(up_perp)
-
-        glColor3f(*UAV_BILLBOARD_CIRCLE_COLOR)
-        glBegin(GL_LINE_LOOP)
-        for i in range(num_segments):
-            theta = 2.0 * np.pi * i / num_segments
-            p = center + radius * (np.cos(theta) * right + np.sin(theta) * up_perp)
-            glVertex3f(p[0], p[1], p[2])
-        glEnd()
-
-        # -- Chassis-aligned horizontal circle (tilts with the UAV) --
-        chassis_radius = 0.12
-        glColor3f(*UAV_CHASSIS_CIRCLE_COLOR)
-        glBegin(GL_LINE_LOOP)
-        for i in range(num_segments):
-            theta = 2.0 * np.pi * i / num_segments
-            local_p = np.array([chassis_radius * np.cos(theta), chassis_radius * np.sin(theta), 0.0])
-            world_p = center + self.uav.body.orientation.apply(local_p)
-            glVertex3f(world_p[0], world_p[1], world_p[2])
-        glEnd()
-
-        # -- Up arrow (UAV local +Z direction, shows which side is top) --
-        arrow_len = 0.28
-        arrow_head = 0.06
-        up_dir = self.uav.body.orientation.apply(np.array([0.0, 0.0, 1.0]))
-        tip = center + up_dir * arrow_len
-        glColor3f(1.0, 1.0, 1.0)
-        glBegin(GL_LINES)
-        # Dashed shaft
-        dash_len = 0.03
-        gap_len = 0.02
-        total = 0.0
-        while total + dash_len < arrow_len - arrow_head:
-            a = center + up_dir * total
-            b = center + up_dir * (total + dash_len)
-            glVertex3f(a[0], a[1], a[2])
-            glVertex3f(b[0], b[1], b[2])
-            total += dash_len + gap_len
-        # Arrowhead: two lines at the tip
-        for sign in (-1, 1):
-            head_local = np.array([sign * arrow_head, 0.0, -arrow_head])
-            head_world = tip + self.uav.body.orientation.apply(head_local)
-            glVertex3f(tip[0], tip[1], tip[2])
-            glVertex3f(head_world[0], head_world[1], head_world[2])
-        glEnd()
-
-        # -- Motor circles (one per motor, tilt with the UAV) --
-        motor_radius = 0.08
-        for i, mpos in enumerate(motor_points):
-            glColor3f(*UAV_MOTOR_COLORS[i])
-            glBegin(GL_LINE_LOOP)
-            for j in range(num_segments):
-                theta = 2.0 * np.pi * j / num_segments
-                local_p = np.array([motor_radius * np.cos(theta), motor_radius * np.sin(theta), 0.0])
-                world_p = mpos + self.uav.body.orientation.apply(local_p)
-                glVertex3f(world_p[0], world_p[1], world_p[2])
-            glEnd()
-
-        # -- Arms connecting center to motors --
-        glColor3f(*UAV_ARM_COLOR)
-        glBegin(GL_LINES)
-        for point in motor_points:
-            glVertex3f(center[0], center[1], center[2])
-            glVertex3f(point[0], point[1], point[2])
-        glEnd()
-
-        # -- Cross at the center --
-        arm = 0.15
-        glColor3f(0.8, 0.8, 0.8)
-        glBegin(GL_LINES)
-        glVertex3f(center[0] - arm, center[1], center[2])
-        glVertex3f(center[0] + arm, center[1], center[2])
-        glVertex3f(center[0], center[1] - arm, center[2])
-        glVertex3f(center[0], center[1] + arm, center[2])
-        glEnd()
-
-        # -- Center point --
-        glPointSize(6.0)
-        glColor3f(*UAV_CENTER_COLOR)
-        glBegin(GL_POINTS)
-        glVertex3f(center[0], center[1], center[2])
-        glEnd()
-
-        # -- Motor points --
-        glPointSize(4.0)
-        glBegin(GL_POINTS)
-        for i, point in enumerate(motor_points):
-            glColor3f(*UAV_MOTOR_COLORS[i])
-            glVertex3f(point[0], point[1], point[2])
-        glEnd()
-
-        return motor_points
+    def _draw_uav(self, dt: float) -> List[np.ndarray]:
+        self._uav_model.draw(dt, UAV_MOTOR_COLORS)
+        return self.uav.motor_world_positions()
 
     def _draw_jammer(self, jammer: Jammer, t: float) -> None:
-        """Base box, mast, antenna light (lit while transmitting) and a
-        ring that pulses outward while the jammer is on."""
-        pos = jammer.position
+        """Lattice tower, antenna light (lit while transmitting) and a ring
+        that pulses outward while the jammer is on."""
         top = jammer.antenna_position
         colour = JAMMER_KIND_COLORS.get(jammer.kind, JAMMER_BODY_COLOR)
         on = jammer.is_on(t)
-        glColor3f(*colour)
-
-        r, h = 0.35, 0.6
-        glBegin(GL_LINES)
-        corners = [(-r, -r), (r, -r), (r, r), (-r, r)]
-        for i, (cx, cy) in enumerate(corners):
-            nx, ny = corners[(i + 1) % 4]
-            for z in (pos[2], pos[2] + h):
-                glVertex3f(pos[0] + cx, pos[1] + cy, z)
-                glVertex3f(pos[0] + nx, pos[1] + ny, z)
-            glVertex3f(pos[0] + cx, pos[1] + cy, pos[2])
-            glVertex3f(pos[0] + cx, pos[1] + cy, pos[2] + h)
-        glVertex3f(pos[0], pos[1], pos[2] + h)
-        glVertex3f(*top)
-        glEnd()
+        draw_tower(jammer.position, jammer.antenna_height, colour)
 
         glPointSize(9.0)
         glColor3f(*(colour if on else tuple(0.25 * c for c in colour)))
@@ -525,7 +412,7 @@ class Renderer:
             phase = (t * 1.5) % 1.0
             radius = 1.0 + 12.0 * phase
             fade = 1.0 - phase
-            glColor3f(*(fade * c for c in colour))
+            glColor3f(*(fade * c + (1.0 - fade) * 0.6 for c in colour))
             glBegin(GL_LINE_LOOP)
             for i in range(32):
                 a = 2.0 * np.pi * i / 32
@@ -569,6 +456,8 @@ class Renderer:
         glPushMatrix()
         glLoadIdentity()
         glDisable(GL_DEPTH_TEST)
+        glDisable(GL_FOG)
+        glDisable(GL_LIGHTING)
 
     def _end_hud_overlay(self) -> None:
         glEnable(GL_DEPTH_TEST)

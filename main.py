@@ -141,7 +141,7 @@ def mitigation_gain_db(link) -> float:
 
 
 def place_random_jammers(jammers: List[Jammer], count: int, extent_half: float,
-                         home: np.ndarray, ground_z: float) -> None:
+                         home: np.ndarray, ground) -> None:
     kinds = list(_JAMMER_KIND_WEIGHTS)
     weights = list(_JAMMER_KIND_WEIGHTS.values())
     margin = 5.0
@@ -151,8 +151,9 @@ def place_random_jammers(jammers: List[Jammer], count: int, extent_half: float,
         pos = np.array([
             random.uniform(-extent_half + margin, extent_half - margin),
             random.uniform(-extent_half + margin, extent_half - margin),
-            ground_z,
+            0.0,
         ])
+        pos[2] = float(ground.height_at(pos[0], pos[1]))  # stand on the terrain
         if np.linalg.norm(pos[:2] - home[:2]) < _JAMMER_MIN_DISTANCE_FROM_HOME:
             continue
         if any(np.linalg.norm(pos[:2] - j.position[:2]) < _JAMMER_MIN_SEPARATION for j in jammers):
@@ -162,9 +163,15 @@ def place_random_jammers(jammers: List[Jammer], count: int, extent_half: float,
 
 
 def reset_jammers(jammers: List[Jammer], extent_half: float, home: np.ndarray,
-                  ground_z: float) -> None:
+                  ground) -> None:
     jammers.clear()
-    place_random_jammers(jammers, _JAMMER_COUNT, extent_half, home, ground_z)
+    place_random_jammers(jammers, _JAMMER_COUNT, extent_half, home, ground)
+
+
+def keep_above_ground(eye: np.ndarray, ground, clearance: float = 0.6) -> np.ndarray:
+    """Stop the camera from sinking into a hill."""
+    floor = float(ground.height_at(eye[0], eye[1])) + clearance
+    return eye if eye[2] >= floor else np.array([eye[0], eye[1], floor])
 
 
 def save_screenshot(window: Window, index: int) -> None:
@@ -185,12 +192,12 @@ def main() -> None:
     world = World()
     command_link, telemetry_link, uav, operator, hud = build_simulation(world, backend)
     camera = Camera()
-    rf = RFEnvironment()
+    rf = RFEnvironment(terrain=world.ground)
     window = Window()
     renderer = Renderer(world, uav, window.width, window.height)
 
     jammers: List[Jammer] = []
-    reset_jammers(jammers, world.extent_half, uav.body.position, world.ground.ground_z)
+    reset_jammers(jammers, world.extent_half, uav.body.position, world.ground)
 
     paused = False
     show_heatmap = True
@@ -224,7 +231,7 @@ def main() -> None:
                 operator.reset()
                 command_link.clear(_BASE_NOISE)
                 telemetry_link.clear(_BASE_NOISE)
-                reset_jammers(jammers, world.extent_half, uav.body.position, world.ground.ground_z)
+                reset_jammers(jammers, world.extent_half, uav.body.position, world.ground)
                 sim_time = 0.0
                 accumulator = 0.0
             if input_state.toggle_heatmap:
@@ -274,6 +281,7 @@ def main() -> None:
 
             window.begin_frame()
             eye, target = camera.eye_and_target(uav.body.position)
+            eye = keep_above_ground(eye, world.ground)
             renderer.draw_scene(eye, target, jammers, sim_time, budget,
                                 heatmap_rf=rf if show_heatmap else None,
                                 link_margin_db=mitigation_gain_db(command_link))

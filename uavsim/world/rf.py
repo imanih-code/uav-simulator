@@ -137,8 +137,18 @@ def _mw_to_dbm(mw):
 
 
 class RFEnvironment:
-    def __init__(self, params: RFParams = None) -> None:
+    """``terrain`` (optional) turns absolute heights into heights above the
+    ground for the path-loss exponent; distances stay 3D. Terrain does not
+    block line of sight in this model."""
+
+    def __init__(self, params: RFParams = None, terrain=None) -> None:
         self.p = params or RFParams()
+        self.terrain = terrain
+
+    def _agl(self, x, y, z):
+        if self.terrain is None:
+            return z
+        return np.maximum(np.asarray(z, dtype=float) - self.terrain.height_at(x, y), 0.1)
 
     # -- single evaluation (every frame) ---------------------------------
     def evaluate(
@@ -151,15 +161,17 @@ class RFEnvironment:
         p = self.p
         uav = np.asarray(uav_position, dtype=float) + np.array([0.0, 0.0, p.uav_antenna_height])
         gs = np.asarray(ground_station, dtype=float)
-        pl_link = float(path_loss_db(np.linalg.norm(uav - gs), uav[2], gs[2], p))
+        h_uav = float(self._agl(uav[0], uav[1], uav[2]))
+        h_gs = float(self._agl(gs[0], gs[1], gs[2]))
+        pl_link = float(path_loss_db(np.linalg.norm(uav - gs), h_uav, h_gs, p))
 
         up_signal = p.ground_station_tx_dbm + p.ground_station_gain_dbi + p.uav_gain_dbi - pl_link
         down_signal = p.uav_tx_dbm + p.uav_gain_dbi + p.ground_station_gain_dbi - pl_link
 
         active = [j for j in jammers if j.is_on(t)]
         tones = [j for j in active if j.kind is JammerKind.TONE]
-        up_i = self._interference_mw(uav, p.uav_gain_dbi, active)
-        down_i = self._interference_mw(gs, p.ground_station_gain_dbi, active)
+        up_i = self._interference_mw(uav, h_uav, p.uav_gain_dbi, active)
+        down_i = self._interference_mw(gs, h_gs, p.ground_station_gain_dbi, active)
         noise = _dbm_to_mw(p.noise_floor_dbm)
         return LinkBudget(
             uplink_signal_dbm=up_signal,
@@ -168,17 +180,19 @@ class RFEnvironment:
             downlink_signal_dbm=down_signal,
             downlink_interference_dbm=float(_mw_to_dbm(down_i)),
             downlink_sinr_db=float(down_signal - _mw_to_dbm(noise + down_i)),
-            uplink_tone_dbm=float(_mw_to_dbm(self._interference_mw(uav, p.uav_gain_dbi, tones))),
+            uplink_tone_dbm=float(_mw_to_dbm(
+                self._interference_mw(uav, h_uav, p.uav_gain_dbi, tones))),
             downlink_tone_dbm=float(_mw_to_dbm(
-                self._interference_mw(gs, p.ground_station_gain_dbi, tones))),
+                self._interference_mw(gs, h_gs, p.ground_station_gain_dbi, tones))),
         )
 
-    def _interference_mw(self, receiver: np.ndarray, rx_gain: float,
+    def _interference_mw(self, receiver: np.ndarray, receiver_agl: float, rx_gain: float,
                          jammers: Iterable[Jammer]) -> float:
         total = 0.0
         for j in jammers:
             src = j.antenna_position
-            pl = float(path_loss_db(np.linalg.norm(receiver - src), receiver[2], src[2], self.p))
+            pl = float(path_loss_db(np.linalg.norm(receiver - src), receiver_agl,
+                                    j.antenna_height, self.p))
             total += float(_dbm_to_mw(j.eirp_dbm + rx_gain - pl))
         return total
 
@@ -191,18 +205,22 @@ class RFEnvironment:
         ground_station: np.ndarray,
         jammers: Sequence[Jammer],
     ) -> np.ndarray:
-        """Uplink SINR (dB) a UAV would see at each (x, y) at `altitude`,
-        with every jammer on (worst case). Shape ``(len(ys), len(xs))``."""
+        """Uplink SINR (dB) a UAV would see at each (x, y) flying at absolute
+        height `altitude`, with every jammer on (worst case).
+        Shape ``(len(ys), len(xs))``."""
         p = self.p
         gx, gy = np.meshgrid(xs, ys)
         z = altitude + p.uav_antenna_height
+        h_uav = self._agl(gx, gy, z)
         gs = np.asarray(ground_station, dtype=float)
+        h_gs = float(self._agl(gs[0], gs[1], gs[2]))
         d_gs = np.sqrt((gx - gs[0]) ** 2 + (gy - gs[1]) ** 2 + (z - gs[2]) ** 2)
         signal = (p.ground_station_tx_dbm + p.ground_station_gain_dbi + p.uav_gain_dbi
-                  - path_loss_db(d_gs, z, gs[2], p))
+                  - path_loss_db(d_gs, h_uav, h_gs, p))
         interference = np.zeros_like(gx)
         for j in jammers:
             src = j.antenna_position
             d = np.sqrt((gx - src[0]) ** 2 + (gy - src[1]) ** 2 + (z - src[2]) ** 2)
-            interference += _dbm_to_mw(j.eirp_dbm + p.uav_gain_dbi - path_loss_db(d, z, src[2], p))
+            interference += _dbm_to_mw(
+                j.eirp_dbm + p.uav_gain_dbi - path_loss_db(d, h_uav, j.antenna_height, p))
         return signal - _mw_to_dbm(_dbm_to_mw(p.noise_floor_dbm) + interference)

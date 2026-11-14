@@ -4,7 +4,8 @@ Python quadcopter (UAV) simulator built to study what radio jamming does
 to a drone's control link, and what can be done about it. Real
 X-configuration 4-motor physics, an onboard flight controller with
 failsafe, an RC uplink and telemetry downlink that go through a real
-(GNU Radio) or approximate (numpy) radio, jammers, and an OSD-style HUD.
+(GNU Radio) or bit-true numpy radio, jammers over rolling terrain, and an
+OSD-style HUD.
 
 None of the UAV's movement is explicitly scripted: the flight controller
 outputs four motor commands, each motor spins up with a realistic lag,
@@ -13,13 +14,15 @@ emergent outcome of that physics.
 
 ## Gallery
 
-| General view | Free camera |
+| On the pad, disarmed | Flying out, interference map on |
 |---|---|
-| ![](assets/images/screenshot_0001.png) | ![](assets/images/screenshot_0002.png) |
+| ![](assets/images/gallery_home.png) | ![](assets/images/gallery_map.png) |
 
-| Approaching jammer | Inside jammer range | Leaving jammer |
+| Control link lost next to a jammer | Failsafe RTH flying home at 15 m | Same area with DSSS4+FEC |
 |---|---|---|
-| ![](assets/images/screenshot_0003.png) | ![](assets/images/screenshot_0004.png) | ![](assets/images/screenshot_0005.png) |
+| ![](assets/images/gallery_failsafe.png) | ![](assets/images/gallery_rth.png) | ![](assets/images/gallery_mitigation.png) |
+
+Earlier wireframe screenshots are kept in `assets/images/screenshot_000*.png`.
 
 ## Installation
 
@@ -244,6 +247,27 @@ on (worst case): transparent above 14 dB, yellow → orange → red down to
 7 dB and below. The line from the ground station to the UAV uses the same
 colours and turns dashed when the control link is dead.
 
+## Terrain and scene
+
+The world is rolling terrain (`uavsim/world/terrain.py`): a deterministic
+heightfield of smooth hills up to 9 m, flattened within 30 m of the
+take-off pad so the ground station and home sit on level ground.
+
+- **It is physical**: ground contact follows the surface; the speed *into*
+  the surface counts as an impact, so flying into a hillside damages the
+  UAV just like a hard landing. ALT/POS hold keep *absolute* altitude (as a
+  barometer would), so flying low toward a hill ends in a crash. RTH climbs
+  to 15 m, above every hill.
+- **It changes the radio**: the path-loss exponent uses height *above the
+  ground*, so hovering 2 m over a hilltop is as ground-hugging as 2 m over
+  the plain. Terrain does not block line of sight (yet).
+- **Scene**: sky gradient and distance fog, sun-shaded terrain with a 10 m
+  grid, a lit 3D quad (red front arms, white canopy, skids) whose props
+  spin with each motor's real speed and carry the motor colours used in
+  the HUD bars, a soft shadow plus drop line under it, lattice towers for
+  jammers, and the interference map draped over the relief. The camera
+  never goes below the terrain.
+
 ## Communication: Real GNU Radio, not an in-memory queue
 
 The Operator and the UAV are each other's transmitter and receiver (the
@@ -309,7 +333,8 @@ uavsim/
 │   ├── battery.py         Battery: drains based on motor load
 │   └── rigid_body.py      RigidBody: 6DOF (numpy + scipy Rotation) + linear/quadratic drag
 ├── world/
-│   ├── environment.py     Flat ground, ground station position, ground contact, world bounds
+│   ├── terrain.py         Terrain heightfield (+ FlatGroundPlane for tests)
+│   ├── environment.py     World, ground station, slope-aware ground contact, world bounds
 │   └── rf.py              Link budgets: path loss, jammer interference, SINR per link,
 │                          SINR -> channel noise, SINR grid for the interference map
 ├── entities/
@@ -324,7 +349,8 @@ uavsim/
     ├── window.py          Window + keyboard/gamepad/mouse input via pygame
     ├── camera.py          Camera: FOLLOW (orbit) and FREE (spectator) modes
     ├── ttf_font.py        TrueType texture atlas font renderer
-    └── renderer.py        Terrain, interference map, UAV, jammers, ground station, HUD
+    ├── scene3d.py         Sky, fog, terrain mesh, 3D quad model + props, shadow, towers
+    └── renderer.py        Scene composition, interference map, markers, full HUD
 uavsim/experiments/        harness (headless Sim), link_curves, jammer_approach
 tests/                     pytest: protocol, flight modes, failsafe, RF model, modem
 ```
@@ -384,5 +410,6 @@ following papers (PDFs available in `docs/`):
 - Port the keyed sequences, header spreading and FEC to the GNU Radio
   backend; interleaving against pulses shorter than a packet; adaptive
   spreading factor driven by LQ; frequency hopping.
-- Non-flat terrain.
-- More realistic ground contact (real normal force instead of clamping).
+- Terrain that blocks line of sight (diffraction / shadowing behind hills).
+- More realistic ground contact (real normal force instead of clamping),
+  tip-over on slopes.

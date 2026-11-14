@@ -129,7 +129,7 @@ class UAV:
     # -- public API ------------------------------------------------------------
     def reset(self) -> None:
         """Back to the initial state: parked on the ground, disarmed."""
-        self.body.position = np.array([0.0, 0.0, self.ground.ground_z])
+        self.body.position = np.array([0.0, 0.0, float(self.ground.height_at(0.0, 0.0))])
         self.body.velocity = np.zeros(3)
         self.body.orientation = Rotation.identity()
         self.body.angular_velocity_body = np.zeros(3)
@@ -280,14 +280,15 @@ class UAV:
         points_body = [motor.position_body for motor in self.motors]
         forces_body = [np.array([0.0, 0.0, t]) for t in thrusts]
         yaw_torque = sum(m.reaction_torque_z(t) for m, t in zip(self.motors, thrusts))
-        pre_vel_z = float(self.body.velocity[2])
         self.body.apply_body_forces(dt, forces_body, points_body, np.array([0.0, 0.0, yaw_torque]))
 
         was_grounded = self.is_grounded
-        self.is_grounded = apply_ground_contact(self.body, self.ground, dt)
-        if not was_grounded and self.is_grounded and pre_vel_z < -self.config.crash_speed:
-            impact = abs(pre_vel_z) - self.config.crash_speed
-            self._health = max(0.0, self._health - impact * 6.0)
+        contact = apply_ground_contact(self.body, self.ground, dt)
+        self.is_grounded = contact.grounded
+        # Speed into the surface: a hard landing or flying into a hillside.
+        if not was_grounded and contact.grounded and contact.impact_speed > self.config.crash_speed:
+            excess = contact.impact_speed - self.config.crash_speed
+            self._health = max(0.0, self._health - excess * 6.0)
             if self._health <= 0.0:
                 self._die()
         apply_world_bounds(self.body, WORLD_EXTENT_HALF)

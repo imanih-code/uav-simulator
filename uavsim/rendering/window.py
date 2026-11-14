@@ -107,7 +107,7 @@ class Window:
 
     def _configure_gl(self) -> None:
         glEnable(GL_DEPTH_TEST)
-        glClearColor(0.05, 0.05, 0.08, 1.0)
+        glClearColor(0.67, 0.76, 0.85, 1.0)  # horizon colour; the sky gradient covers it
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         gluPerspective(60.0, self.width / self.height, 0.1, 500.0)

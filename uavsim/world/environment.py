@@ -1,59 +1,61 @@
-"""Minimal simulated world.
+"""Simulated world: terrain, ground station, bounds and ground contact.
 
-For now this is a single flat, infinite ground plane at z = 0 and nothing
-else. Jammers and other environmental effects will attach to `World` later
-without requiring any change to UAV or UAVOperator.
-
-`apply_ground_contact` is a small, generic function (not a UAV concept) that
-keeps any `RigidBody` from sinking through the ground plane: it clamps the
-body to ground level, cancels downward velocity, and applies simple
-friction to horizontal sliding while resting. `RigidBody` itself stays
-completely unaware that terrain exists -- this function is the only bridge
-between "world" and "physics".
+`apply_ground_contact` is a small, generic function (not a UAV concept)
+that keeps any `RigidBody` from sinking into the terrain: it pushes the
+body back onto the surface, removes the velocity component going into the
+surface (reporting how fast that was, so crashes into hillsides count, not
+just hard vertical landings), and applies friction while resting.
+`RigidBody` itself stays completely unaware that terrain exists -- this
+function is the only bridge between "world" and "physics".
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Union
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 
 from uavsim.physics.rigid_body import RigidBody
+from uavsim.world.terrain import FlatGroundPlane, Terrain
 
-# Half the side length of the square world grid. The UAV cannot fly beyond
+__all__ = [
+    "WORLD_EXTENT_HALF", "FlatGroundPlane", "Terrain", "World", "ContactResult",
+    "apply_ground_contact", "apply_world_bounds",
+]
+
+# Half the side length of the square world. The UAV cannot fly beyond
 # [-WORLD_EXTENT_HALF, WORLD_EXTENT_HALF] in X or Y.
 WORLD_EXTENT_HALF = 200
 
-# Simple friction coefficient applied to horizontal velocity while resting
-# on the ground (landing gear grip), per second of contact.
+# Friction applied to sliding while resting on the ground, per second.
 _GROUND_FRICTION_PER_SECOND = 4.0
 
-
-@dataclass(frozen=True)
-class FlatGroundPlane:
-    ground_z: float = 0.0
-
-    def height_at(self, x: float, y: float) -> float:
-        del x, y  # flat plane: height is the same everywhere, for now
-        return self.ground_z
+Ground = Union[FlatGroundPlane, Terrain]
 
 
 @dataclass
 class World:
-    ground: FlatGroundPlane = field(default_factory=FlatGroundPlane)
+    ground: Ground = field(default_factory=Terrain)
     extent_half: float = WORLD_EXTENT_HALF
     # The pilot's ground station (RC transmitter + telemetry receiver):
     # a few metres behind the take-off point, antenna at head height.
-    ground_station: np.ndarray = field(default_factory=lambda: np.array([-4.0, 0.0, 1.5]))
+    ground_station: np.ndarray = None
+
+    def __post_init__(self) -> None:
+        if self.ground_station is None:
+            x, y = -4.0, 0.0
+            self.ground_station = np.array([x, y, float(self.ground.height_at(x, y)) + 1.5])
+
+
+@dataclass(frozen=True)
+class ContactResult:
+    grounded: bool
+    impact_speed: float = 0.0   # m/s into the surface just before contact
 
 
 def apply_world_bounds(body: RigidBody, extent_half: float) -> None:
-    """Clamp `body` position inside the square world limits and kill velocity
-    components that would push it outside.
-
-    This mirrors the approach of `apply_ground_contact`: passive position
-    clamping every tick, no impulse-based collision response.
-    """
+    """Clamp `body` inside the square world and kill velocity pushing outward."""
     for axis in (0, 1):
         if body.position[axis] < -extent_half:
             body.position[axis] = -extent_half
@@ -65,30 +67,30 @@ def apply_world_bounds(body: RigidBody, extent_half: float) -> None:
                 body.velocity[axis] = 0.0
 
 
-def apply_ground_contact(body: RigidBody, ground: FlatGroundPlane, dt: float) -> bool:
-    """Keep `body` from falling through `ground`.
+def apply_ground_contact(body: RigidBody, ground: Ground, dt: float) -> ContactResult:
+    """Keep `body` on or above the terrain surface.
 
-    Returns True if the body is currently resting on the ground. This is a
-    passive contact model: it does not simulate a real normal-force impulse,
-    it simply clamps position/velocity every tick, which is enough for a
-    UAV that starts parked on the ground and only leaves it once its own
-    thrust exceeds gravity.
+    Passive contact model: position is projected back onto the surface and
+    the velocity component into it is removed (no bounce). Enough for a
+    UAV that rests on its gear and takes off under its own thrust.
     """
-    grounded = body.position[2] <= ground.ground_z
-    if not grounded:
-        return False
+    x, y = float(body.position[0]), float(body.position[1])
+    surface = float(ground.height_at(x, y))
+    if body.position[2] > surface:
+        return ContactResult(False)
 
-    body.position[2] = ground.ground_z
-    if body.velocity[2] < 0.0:
-        body.velocity[2] = 0.0
-
+    normal = ground.normal_at(x, y)
+    body.position[2] = surface
     friction = max(0.0, 1.0 - _GROUND_FRICTION_PER_SECOND * dt)
-    body.velocity[0] *= friction
-    body.velocity[1] *= friction
+    v_normal = float(np.dot(body.velocity, normal))
+    v_tangent = body.velocity - v_normal * normal
+    impact = max(0.0, -v_normal)
+    # Drop the part going into the ground; slide along it with friction.
+    body.velocity = max(v_normal, 0.0) * normal + friction * v_tangent
 
-    # Landing gear sits flat on the ground: it cannot roll or pitch while
+    # Landing gear sits on the ground: it cannot roll or pitch while
     # resting, only keep its heading (and slowly stop spinning on it).
     yaw = body.orientation.as_euler("xyz")[2]
     body.orientation = Rotation.from_euler("z", yaw)
     body.angular_velocity_body = np.array([0.0, 0.0, body.angular_velocity_body[2] * friction])
-    return True
+    return ContactResult(True, impact)
