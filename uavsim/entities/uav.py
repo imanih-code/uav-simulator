@@ -1,30 +1,42 @@
 """UAV entity: a quadcopter airframe with 4 motors in an X configuration.
 
-The UAV does not know about keyboards or rendering. It only:
-  1. Reads bit-encoded Commands from its CommGatewayInput.
-  2. Adjusts the corresponding motor's throttle.
-  3. Lets RigidBody physics turn motor thrust into real motion -- no
-     movement direction is ever scripted explicitly.
-  4. Stays resting on the ground until its own thrust can lift it (via
-     `apply_ground_contact`, a world-level concern, not a UAV one).
-  5. Periodically reports its own state -- including battery and total
-     mass -- as telemetry through its CommGatewayOutput.
+The UAV does not know about keyboards or rendering. Every fixed physics
+tick it:
+
+  1. Drains RC frames from its CommGatewayInput (absolute stick positions,
+     see `uavsim.control.rc`) and feeds the link monitor.
+  2. Handles arming / disarming from the pilot's arm switch.
+  3. Lets the failsafe decide who is in control: the pilot's last sticks,
+     a self-levelling hold, or the autopilot (HOLD / LAND / RTH / DROP).
+  4. Runs the onboard flight controller, which turns that into 4 motor
+     commands -- the pilot never drives motors directly.
+  5. Integrates motor spin-up, thrust and torque on the rigid body; the
+     motion still falls out of the physics, nothing is scripted.
+  6. Periodically reports its state as telemetry through its
+     CommGatewayOutput.
 """
 from __future__ import annotations
 
-import time
-from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from uavsim.comms.command import Command, CommandOpcode
 from uavsim.comms.gateway import CommGatewayInput, CommGatewayOutput
 from uavsim.comms.telemetry import TelemetryPacket
+from uavsim.control.failsafe import Failsafe, FailsafeParams, FailsafeStage, LinkMonitor
+from uavsim.control.flight_controller import (
+    ControlInput,
+    ControlKind,
+    FCParams,
+    FlightController,
+    Mixer,
+    VehicleState,
+)
+from uavsim.control.rc import FailsafeAction, FlightMode, RCPacket, Sticks
 from uavsim.physics.battery import Battery
-from uavsim.physics.motor import Motor
+from uavsim.physics.motor import YAW_TORQUE_PER_NEWTON, Motor
 from uavsim.physics.rigid_body import RigidBody
 from uavsim.world.environment import (
     FlatGroundPlane,
@@ -45,41 +57,40 @@ class MotorId:
 
 @dataclass
 class UAVConfig:
-    body_mass: float = 0.22                 # kg, airframe + electronics
-    motor_mass: float = 0.012               # kg, each of the 4 motors
+    """A ~450 mm class quadcopter (the size of a typical camera/research drone)."""
+
+    body_mass: float = 0.80                 # kg, frame + battery + electronics
+    motor_mass: float = 0.05                # kg, each of the 4 motors
     inertia_diag: np.ndarray = field(
-        default_factory=lambda: np.array([0.02, 0.02, 0.04])
+        default_factory=lambda: np.array([0.0082, 0.0082, 0.0149])
     )
-    arm_length: float = 0.25                # meters, center of mass to motor
-    max_thrust_per_motor: float = 6.0       # newtons
-    telemetry_interval: float = 0.1         # seconds between telemetry packets
+    arm_length: float = 0.225               # m, centre of mass to motor
+    max_thrust_per_motor: float = 6.0       # N -> thrust/weight ~2.4, hover ~41% thrust
+    motor_time_constant: float = 0.035      # s, rotor spin-up lag
+    telemetry_interval: float = 0.1         # s between telemetry packets
+    rc_rate_hz: float = 50.0                # expected RC frame rate (for link quality)
+    crash_speed: float = 3.0                # m/s vertical impact before damage starts
 
     @property
     def total_mass(self) -> float:
-        """Body + all 4 motors, lumped into a single mass for the physics.
-
-        Each motor does have its own (smaller) mass, but for the rigid
-        body equations we treat the airframe as one uniform point mass at
-        the center of gravity -- we're not modeling each motor's own
-        inertial contribution separately.
-        """
+        """Body + all 4 motors, lumped into a single rigid body."""
         return self.body_mass + 4 * self.motor_mass
 
 
-def _default_motor_layout(arm_length: float, max_thrust: float) -> List[Motor]:
-    """Build the 4 motors in a standard X airframe layout.
+def _default_motor_layout(config: UAVConfig) -> List[Motor]:
+    """Standard X layout. Body frame: +X forward, +Y left, +Z up.
 
-    Positions are in the body frame, relative to the drone's center of
-    mass (the "red point" of the simplified 3D model). +X is forward,
-    +Y is left, +Z is up. Motors are placed diagonally, X-style, and
-    alternate spin direction so their reaction torques mostly cancel.
+    Diagonal motors share a spin direction so reaction torques cancel at
+    equal thrust; yaw comes from speeding up one diagonal pair.
     """
-    offset = arm_length / np.sqrt(2)
+    offset = config.arm_length / np.sqrt(2)
+    tc = config.motor_time_constant
+    thrust = config.max_thrust_per_motor
     return [
-        Motor(np.array([offset, -offset, 0.0]), max_thrust, spin_direction=+1),   # front-right
-        Motor(np.array([-offset, -offset, 0.0]), max_thrust, spin_direction=-1),  # back-right
-        Motor(np.array([-offset, offset, 0.0]), max_thrust, spin_direction=+1),   # back-left
-        Motor(np.array([offset, offset, 0.0]), max_thrust, spin_direction=-1),    # front-left
+        Motor(np.array([offset, -offset, 0.0]), thrust, spin_direction=+1, time_constant=tc),   # FR
+        Motor(np.array([-offset, -offset, 0.0]), thrust, spin_direction=-1, time_constant=tc),  # BR
+        Motor(np.array([-offset, offset, 0.0]), thrust, spin_direction=+1, time_constant=tc),   # BL
+        Motor(np.array([offset, offset, 0.0]), thrust, spin_direction=-1, time_constant=tc),    # FL
     ]
 
 
@@ -90,245 +101,90 @@ class UAV:
         ground: FlatGroundPlane,
         command_input: CommGatewayInput,
         telemetry_output: CommGatewayOutput,
+        fc_params: Optional[FCParams] = None,
+        failsafe_params: Optional[FailsafeParams] = None,
     ) -> None:
         self.config = config
         self.ground = ground
-        self.motors = _default_motor_layout(config.arm_length, config.max_thrust_per_motor)
+        self.motors = _default_motor_layout(config)
         self.body = RigidBody(mass=config.total_mass, inertia_diag=config.inertia_diag)
         self.battery = Battery()
 
-        # The UAV starts parked on the ground, at rest, exactly like a real
-        # drone before takeoff -- not mid-air, not already falling.
-        self.body.position = np.array([0.0, 0.0, ground.ground_z])
+        mixer = Mixer(
+            [m.position_body for m in self.motors],
+            [m.spin_direction for m in self.motors],
+            YAW_TORQUE_PER_NEWTON,
+            config.max_thrust_per_motor,
+        )
+        self.flight_controller = FlightController(
+            config.total_mass, config.inertia_diag, mixer, fc_params
+        )
+        self.link = LinkMonitor(config.rc_rate_hz)
+        self.failsafe = Failsafe(failsafe_params)
 
         self._command_input = command_input
         self._telemetry_output = telemetry_output
-        self._time_since_last_telemetry = 0.0
-        self._raw_throttle: List[float] = [0.0, 0.0, 0.0, 0.0]
-        self._last_motor_cmd_time: List[float] = [0.0, 0.0, 0.0, 0.0]
-        self._last_cmd_direction: List[int] = [0, 0, 0, 0]  # +1 UP, -1 DOWN, 0 none
-        self._armed = True
-        self.is_grounded = True
-        self._command_log: deque = deque(maxlen=10)
-        self._was_airborne = False
-        self._health = 100.0
-        self._dead = False
-        self._radio_enabled = False
-
-    @property
-    def radio_enabled(self) -> bool:
-        return self._radio_enabled
-
-    @radio_enabled.setter
-    def radio_enabled(self, value: bool) -> None:
-        self._radio_enabled = value
-
-    # -- command handling --------------------------------------------------
-    def _process_incoming_commands(self) -> None:
-        if self._dead:
-            return
-        for raw_packet in self._command_input.receive_all():
-            try:
-                command = Command.decode(raw_packet)
-            except ValueError:
-                self._command_log.append(
-                    (CommandOpcode.EMERGENCY_CUT, 0, False)
-                )
-                continue
-            self._apply_command(command)
-
-    def _apply_command(self, command: Command) -> None:
-        if self._dead:
-            return
-        self._command_log.append((int(command.opcode), command.motor_id, True))
-        if command.opcode == CommandOpcode.THROTTLE_UP:
-            self._raw_throttle[command.motor_id] = min(
-                1.0, self._raw_throttle[command.motor_id] + self.motors[0].throttle_step_up
-            )
-            self._last_motor_cmd_time[command.motor_id] = time.time()
-            self._last_cmd_direction[command.motor_id] = 1
-        elif command.opcode == CommandOpcode.THROTTLE_DOWN:
-            self._raw_throttle[command.motor_id] = max(
-                0.0, self._raw_throttle[command.motor_id] - self.motors[0].throttle_step_down
-            )
-            self._last_motor_cmd_time[command.motor_id] = time.time()
-            self._last_cmd_direction[command.motor_id] = -1
-        elif command.opcode == CommandOpcode.THROTTLE_UP_ALL:
-            now = time.time()
-            for i in range(4):
-                self._raw_throttle[i] = min(1.0, self._raw_throttle[i] + self.motors[0].throttle_step_up)
-                self._last_motor_cmd_time[i] = now
-                self._last_cmd_direction[i] = 1
-        elif command.opcode == CommandOpcode.THROTTLE_DOWN_ALL:
-            now = time.time()
-            for i in range(4):
-                self._raw_throttle[i] = max(0.0, self._raw_throttle[i] - self.motors[0].throttle_step_down)
-                self._last_motor_cmd_time[i] = now
-                self._last_cmd_direction[i] = -1
-        elif command.opcode == CommandOpcode.ARM:
-            self._armed = True
-        elif command.opcode == CommandOpcode.DISARM:
-            self._armed = False
-        elif command.opcode == CommandOpcode.EMERGENCY_CUT:
-            self._armed = False
-            for i in range(4):
-                self._raw_throttle[i] = 0.0
-                self._last_cmd_direction[i] = 0
-
-    # -- hover controller ----------------------------------------------------
-    # Gain that opposes vertical velocity to produce a natural altitude hold.
-    # Higher values = stiffer hold; too high can oscillate.
-    _HOVER_GAIN = 0.4
-    _MOTOR_TIMEOUT = 0.15
-    _P_GAIN = 0.15
-    _D_GAIN = 0.05
-
-    # -- physics -------------------------------------------------------------
-    def _integrate_physics(self, dt: float) -> None:
-        if self._dead:
-            for motor in self.motors:
-                motor.throttle = 0.0
-            self.body.apply_body_forces(dt, [], [], None)
-            self.is_grounded = apply_ground_contact(self.body, self.ground, dt)
-            apply_world_bounds(self.body, WORLD_EXTENT_HALF)
-            return
-
-        if self._armed:
-            now = time.time()
-            min_raw = min(self._raw_throttle)
-            rpy = self.body.attitude_rpy()
-            w = self.body.angular_velocity_body
-            roll_corr = np.clip(rpy[0] * self._P_GAIN + w[0] * self._D_GAIN, -0.10, 0.10)
-            pitch_corr = np.clip(rpy[1] * self._P_GAIN + w[1] * self._D_GAIN, -0.10, 0.10)
-            corrections = np.array([
-                +roll_corr + pitch_corr,
-                +roll_corr - pitch_corr,
-                -roll_corr - pitch_corr,
-                -roll_corr + pitch_corr,
-            ])
-            # When any motor is being actively commanded DOWN, use max_raw as
-            # the base so the drone tilts instead of dragging everything down.
-            any_down = any(
-                (now - self._last_motor_cmd_time[i] < self._MOTOR_TIMEOUT)
-                and self._last_cmd_direction[i] == -1
-                for i in range(4)
-            )
-            base_raw = max(self._raw_throttle) if any_down else min_raw
-            for i in range(4):
-                if now - self._last_motor_cmd_time[i] >= self._MOTOR_TIMEOUT:
-                    self.motors[i].throttle = np.clip(base_raw + corrections[i], 0.0, 1.0)
-                else:
-                    self.motors[i].throttle = self._raw_throttle[i]
-        else:
-            for motor in self.motors:
-                motor.throttle = 0.0
-
-        # Pre-contact velocity for crash detection
-        pre_vel_z = self.body.velocity[2]
-
-        # Hover correction: damps upward velocity so the drone doesn't
-        # runaway when throttle is above hover level. Does NOT oppose
-        # downward motion — when throttle is cut the drone falls freely.
-        hover_correction = -max(self.body.velocity[2], 0.0) * self._HOVER_GAIN
-        effective_throttles = [
-            max(0.0, min(1.0, m.throttle + hover_correction))
-            for m in self.motors
-        ]
-
-        # Damage reduces effective max thrust
-        dmg_factor = 1.0 - (100.0 - self._health) * 0.005  # 1.0 at 100% hp, 0.5 at 0% hp
-        effective_max = self.config.max_thrust_per_motor * dmg_factor
-
-        points_body = [motor.position_body for motor in self.motors]
-        forces_body = [
-            np.array([0.0, 0.0, t * effective_max])
-            for t, _ in zip(effective_throttles, self.motors)
-        ]
-        yaw_reaction_torque = np.array([
-            0.0, 0.0,
-            sum(-m.spin_direction * 0.02 * t for t, m in zip(effective_throttles, self.motors)),
-        ])
-        self.body.apply_body_forces(dt, forces_body, points_body, yaw_reaction_torque)
-
-        # Crash detection
-        was_grounded = self.is_grounded
-        self.is_grounded = apply_ground_contact(self.body, self.ground, dt)
-        if not was_grounded and self.is_grounded and pre_vel_z < -3.0:
-            impact = abs(pre_vel_z) - 3.0
-            damage = impact * 6.0
-            self._health = max(0.0, self._health - damage)
-            if self._health <= 0.0:
-                self._dead = True
-
-        apply_world_bounds(self.body, WORLD_EXTENT_HALF)
-
-    # -- battery ---------------------------------------------------------------
-    def _update_battery(self, dt: float) -> None:
-        total_throttle = sum(m.throttle for m in self.motors)
-        self.battery.update(dt, total_throttle, max_total_throttle=len(self.motors))
-        if self.battery.charge_percent <= 0.0 and not self._dead:
-            self._dead = True
-
-    # -- telemetry ------------------------------------------------------------
-    def _send_telemetry_if_due(self, dt: float) -> None:
-        self._time_since_last_telemetry += dt
-        if self._time_since_last_telemetry < self.config.telemetry_interval:
-            return
-        self._time_since_last_telemetry = 0.0
-
-        packet = TelemetryPacket(
-            timestamp=time.time(),
-            position=self.body.position.copy(),
-            velocity=self.body.velocity.copy(),
-            attitude_rpy=self.body.attitude_rpy(),
-            angular_velocity=self.body.angular_velocity_body.copy(),
-            motor_throttle=np.array([m.throttle for m in self.motors]),
-            battery_percent=self.battery.charge_percent,
-            mass=self.config.total_mass,
-            command_log=tuple(self._command_log),
-            health_percent=self._health,
-        )
-        self._telemetry_output.send(packet.encode())
+        self.reset()
 
     # -- public API ------------------------------------------------------------
-    def update(self, dt: float) -> None:
-        """Advance the UAV by one simulation tick of length `dt` seconds."""
-        if dt <= 0.0:
-            return
-        if not self._radio_enabled:
-            self._command_input.receive_all()  # drain stale packets
-            self._time_since_last_telemetry = 0.0
-            return
-        self._process_incoming_commands()
-        self._integrate_physics(dt)
-        self._update_battery(dt)
-        self._send_telemetry_if_due(dt)
-
     def reset(self) -> None:
-        """Reset the UAV to its initial parked-on-ground state."""
+        """Back to the initial state: parked on the ground, disarmed."""
         self.body.position = np.array([0.0, 0.0, self.ground.ground_z])
         self.body.velocity = np.zeros(3)
         self.body.orientation = Rotation.identity()
         self.body.angular_velocity_body = np.zeros(3)
         for motor in self.motors:
-            motor.throttle = 0.0
-        self._raw_throttle = [0.0, 0.0, 0.0, 0.0]
-        self._last_motor_cmd_time = [0.0, 0.0, 0.0, 0.0]
-        self._last_cmd_direction = [0, 0, 0, 0]
-        self._radio_enabled = False
+            motor.reset()
         self.battery.charge_percent = 100.0
+        self.flight_controller.reset()
+        self.failsafe.reset()
+        self.link.reset()
+
+        self.armed = False
+        self.home = self.body.position.copy()
+        self.is_grounded = True
+        self.sim_time = 0.0
+        self.rejected_frames = 0
         self._health = 100.0
         self._dead = False
-        self.is_grounded = True
-        self._command_log.clear()
-        self._was_airborne = False
+        self._last_rc: Optional[RCPacket] = None
+        # Like a real FC: the arm switch must be seen OFF before arming is allowed.
+        self._arm_blocked = True
+        self._applied = ControlInput(ControlKind.MANUAL, FlightMode.ANGLE, Sticks())
         self._time_since_last_telemetry = 0.0
-        # Drain any pending command packets (extra safety — clear() also drains)
+        self._telemetry_seq = 0
         self._command_input.receive_all()
+
+    def step(self, dt: float, now: float) -> None:
+        """Advance one fixed physics/control tick of `dt` seconds at sim time `now`."""
+        if dt <= 0.0:
+            return
+        self.sim_time = now
+        self._process_incoming_frames(now)
+        self._update_arming(now)
+        self._run_control(dt, now)
+        self._integrate_physics(dt)
+        self._update_battery(dt)
+        self._send_telemetry_if_due(dt)
 
     @property
     def command_input(self) -> CommGatewayInput:
         return self._command_input
+
+    @property
+    def health(self) -> float:
+        return self._health
+
+    @property
+    def dead(self) -> bool:
+        return self._dead
+
+    @property
+    def flight_mode(self) -> FlightMode:
+        return self._last_rc.mode if self._last_rc else FlightMode.ANGLE
+
+    def link_quality(self) -> float:
+        return self.link.link_quality(self.sim_time)
 
     def motor_world_positions(self) -> List[np.ndarray]:
         """Motor mount points in world space -- used only by the renderer."""
@@ -336,3 +192,152 @@ class UAV:
             self.body.position + self.body.orientation.apply(motor.position_body)
             for motor in self.motors
         ]
+
+    # -- uplink ------------------------------------------------------------------
+    def _process_incoming_frames(self, now: float) -> None:
+        for raw in self._command_input.receive_all():
+            try:
+                packet = RCPacket.decode(raw)
+            except ValueError:
+                self.rejected_frames += 1
+                continue
+            self.link.packet_received(now, packet.seq)
+            self._last_rc = packet
+
+    def _update_arming(self, now: float) -> None:
+        rc = self._last_rc
+        link_ok = self.link.time_since_last(now) <= self.failsafe.p.loss_timeout
+        if self.armed:
+            # Pilot disarm only counts if we can actually hear the pilot.
+            if link_ok and rc is not None and not rc.arm_switch:
+                self._disarm()
+            return
+        if rc is None or not link_ok:
+            return
+        if not rc.arm_switch:
+            self._arm_blocked = False
+            return
+        if self._arm_blocked or self._dead or not self.is_grounded:
+            return
+        manual_throttle = rc.mode in (FlightMode.ACRO, FlightMode.ANGLE)
+        if rc.sticks.throttle > (0.10 if manual_throttle else 0.60):
+            return  # refuse to arm with the throttle up, like every real FC
+        self.armed = True
+        self.home = self.body.position.copy()
+        self.flight_controller.reset(self._vehicle_state())
+        self.failsafe.reset()
+
+    def _disarm(self) -> None:
+        self.armed = False
+        self._arm_blocked = True
+        self.failsafe.reset()
+        for motor in self.motors:
+            motor.command = 0.0
+
+    # -- control -----------------------------------------------------------------
+    def _vehicle_state(self) -> VehicleState:
+        return VehicleState(
+            position=self.body.position,
+            velocity=self.body.velocity,
+            orientation=self.body.orientation,
+            angular_velocity_body=self.body.angular_velocity_body,
+            landed=self.is_grounded,
+        )
+
+    def _run_control(self, dt: float, now: float) -> None:
+        if not self.armed or self._dead:
+            for motor in self.motors:
+                motor.command = 0.0
+            return
+        rc = self._last_rc
+        decision = self.failsafe.update(
+            now=now,
+            time_since_packet=self.link.time_since_last(now),
+            position=self.body.position,
+            home=self.home,
+            last_sticks=rc.sticks if rc else Sticks(),
+            last_mode=rc.mode if rc else FlightMode.ANGLE,
+            configured_action=rc.failsafe_action if rc else FailsafeAction.LAND,
+            touchdown=self.flight_controller.touchdown,
+        )
+        if decision.force_disarm:
+            self._disarm()
+            return
+        self._applied = decision.control
+        commands = self.flight_controller.update(dt, self._vehicle_state(), decision.control)
+        for motor, command in zip(self.motors, commands):
+            motor.command = float(command)
+
+    # -- physics -------------------------------------------------------------------
+    def _integrate_physics(self, dt: float) -> None:
+        # Damage reduces effective thrust: 100% at full health, 50% at 0 HP.
+        efficiency = 1.0 - (100.0 - self._health) * 0.005
+        thrusts = []
+        for motor in self.motors:
+            motor.update(dt)
+            thrusts.append(motor.thrust(efficiency))
+
+        points_body = [motor.position_body for motor in self.motors]
+        forces_body = [np.array([0.0, 0.0, t]) for t in thrusts]
+        yaw_torque = sum(m.reaction_torque_z(t) for m, t in zip(self.motors, thrusts))
+        pre_vel_z = float(self.body.velocity[2])
+        self.body.apply_body_forces(dt, forces_body, points_body, np.array([0.0, 0.0, yaw_torque]))
+
+        was_grounded = self.is_grounded
+        self.is_grounded = apply_ground_contact(self.body, self.ground, dt)
+        if not was_grounded and self.is_grounded and pre_vel_z < -self.config.crash_speed:
+            impact = abs(pre_vel_z) - self.config.crash_speed
+            self._health = max(0.0, self._health - impact * 6.0)
+            if self._health <= 0.0:
+                self._die()
+        apply_world_bounds(self.body, WORLD_EXTENT_HALF)
+
+    def _die(self) -> None:
+        self._dead = True
+        self._disarm()
+
+    # -- battery -----------------------------------------------------------------
+    def _update_battery(self, dt: float) -> None:
+        total = sum(m.speed for m in self.motors)
+        self.battery.update(dt, total, max_total_throttle=len(self.motors))
+        if self.battery.charge_percent <= 0.0 and not self._dead:
+            self._die()
+
+    # -- telemetry ---------------------------------------------------------------
+    def applied_sticks(self) -> Tuple[float, float, float, float]:
+        """Sticks the controller is acting on right now (centred while on autopilot)."""
+        if not self.armed and self._last_rc is not None:
+            s = self._last_rc.sticks
+            return (s.throttle, s.roll, s.pitch, s.yaw)
+        if self._applied.kind is ControlKind.NAV:
+            return (0.5, 0.0, 0.0, 0.0)
+        s = self._applied.sticks
+        return (s.throttle, s.roll, s.pitch, s.yaw)
+
+    def _send_telemetry_if_due(self, dt: float) -> None:
+        self._time_since_last_telemetry += dt
+        if self._time_since_last_telemetry < self.config.telemetry_interval:
+            return
+        self._time_since_last_telemetry = 0.0
+        self._telemetry_seq = (self._telemetry_seq + 1) & 0xFFFF
+        stage = self.failsafe.stage if self.armed else FailsafeStage.OK
+        packet = TelemetryPacket(
+            seq=self._telemetry_seq,
+            timestamp=self.sim_time,
+            position=self.body.position.copy(),
+            velocity=self.body.velocity.copy(),
+            attitude_rpy=self.body.attitude_rpy(),
+            angular_velocity=self.body.angular_velocity_body.copy(),
+            motor_throttle=np.array([m.command for m in self.motors]),
+            battery_percent=self.battery.charge_percent,
+            mass=self.config.total_mass,
+            health_percent=self._health,
+            applied_sticks=self.applied_sticks(),
+            uplink_lq=self.link_quality(),
+            flight_mode=int(self.flight_mode),
+            failsafe_stage=int(stage),
+            failsafe_action=int(self.failsafe.action),
+            armed=self.armed,
+            landed=self.is_grounded,
+        )
+        self._telemetry_output.send(packet.encode())

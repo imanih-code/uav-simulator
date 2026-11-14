@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from uavsim.physics.rigid_body import RigidBody
 
@@ -41,6 +42,9 @@ class FlatGroundPlane:
 class World:
     ground: FlatGroundPlane = field(default_factory=FlatGroundPlane)
     extent_half: float = WORLD_EXTENT_HALF
+    # The pilot's ground station (RC transmitter + telemetry receiver):
+    # a few metres behind the take-off point, antenna at head height.
+    ground_station: np.ndarray = field(default_factory=lambda: np.array([-4.0, 0.0, 1.5]))
 
 
 def apply_world_bounds(body: RigidBody, extent_half: float) -> None:
@@ -81,4 +85,10 @@ def apply_ground_contact(body: RigidBody, ground: FlatGroundPlane, dt: float) ->
     friction = max(0.0, 1.0 - _GROUND_FRICTION_PER_SECOND * dt)
     body.velocity[0] *= friction
     body.velocity[1] *= friction
+
+    # Landing gear sits flat on the ground: it cannot roll or pitch while
+    # resting, only keep its heading (and slowly stop spinning on it).
+    yaw = body.orientation.as_euler("xyz")[2]
+    body.orientation = Rotation.from_euler("z", yaw)
+    body.angular_velocity_body = np.array([0.0, 0.0, body.angular_velocity_body[2] * friction])
     return True

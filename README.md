@@ -1,14 +1,15 @@
 # UAVSIM
 
-Python quadcopter (UAV) simulator. Real X-configuration 4-motor physics,
-bit-encoded command/telemetry comms, free-world/follow camera, and an HUD
-with live indicators + signal scopes — all rendered with OpenGL using only
-points and lines (no textures, no external fonts).
+Python quadcopter (UAV) simulator built to study what radio jamming does
+to a drone's control link, and what can be done about it. Real
+X-configuration 4-motor physics, an onboard flight controller with
+failsafe, an RC uplink and telemetry downlink that go through a real
+(GNU Radio) or approximate (numpy) radio, jammers, and an OSD-style HUD.
 
-None of the UAV's movement is explicitly scripted: thrust per motor is
-computed, force/torque is integrated over a rigid body, and the resulting
-motion (translation, pitch, roll, yaw) is an emergent outcome of that
-physics.
+None of the UAV's movement is explicitly scripted: the flight controller
+outputs four motor commands, each motor spins up with a realistic lag,
+thrust and torque are integrated over a rigid body, and the motion is an
+emergent outcome of that physics.
 
 ## Gallery
 
@@ -77,39 +78,84 @@ system Python instead, or create the venv with `--system-site-packages`).
 ## Run
 
 ```bash
-python main.py
+python main.py                 # GNU Radio if installed, numpy link otherwise
+python main.py --link loopback # force the fast approximate numpy radio
+```
+
+`--link loopback` needs only `numpy scipy pygame PyOpenGL` and runs on
+Windows. It keeps the same frame structure (unspread 32-bit sync word,
+CRC32, optional DSSS) but replaces the DSP with a calibrated bit-error
+model, so use GNU Radio for results you want to report.
+
+Tests (headless, no GNU Radio or display needed):
+
+```bash
+pip install pytest
+python -m pytest
 ```
 
 ## Controls
 
-**Motors** — the drone is an X shape viewed from above, with 4 motors. Each
-number key accelerates one motor; the letter directly above it (on QWERTY)
-decelerates it gradually down to 0.
+You fly it like a real drone: the sticks go to an **onboard flight
+controller**, never to individual motors. The transmitter sends the
+absolute stick positions 50 times per second (like SBUS / CRSF / ELRS),
+so a lost frame is simply replaced by the next one.
 
-| Motor         | Accelerate | Decelerate |
-|---------------|-----------|------------|
-| Front-right   | `1`       | `Q`        |
-| Back-right    | `2`       | `W`        |
-| Back-left     | `3`       | `E`        |
-| Front-left    | `4`       | `R`        |
-| All 4         | `5`       | `T`        |
+**Sticks** (Mode 2 layout, left hand W A S D, right hand I J K L):
 
-The UAV **starts parked on the ground, at rest**. If you don't give it
-enough total thrust (all 4 motors combined exceeding its weight), it simply
-stays there — no falling, no sinking. It only takes off when you, the
-operator, give it enough thrust.
+| Key       | Stick                 | ALT / POS hold          | ANGLE / ACRO            |
+|-----------|-----------------------|-------------------------|-------------------------|
+| `W` / `S` | throttle              | climb / descend (spring)| raise / lower (stays)   |
+| `A` / `D` | yaw                   | turn left / right       | turn left / right       |
+| `I` / `K` | pitch                 | forward / back          | nose down / up          |
+| `J` / `L` | roll                  | left / right            | bank left / right       |
 
-**Camera** (never first-person — always an external observer):
+**Switches**
+
+| Key     | Action |
+|---------|--------|
+| `SPACE` | Arm switch. Arming needs the UAV on the ground, the throttle low, and the switch seen OFF first |
+| `M`     | Flight mode: `POS` → `ALT` → `ANGLE` → `ACRO` |
+| `G`     | Failsafe action: `RTH` → `HOLD` → `LAND` → `DROP` |
+| `X`     | Transmitter on/off — kill the link on purpose to test the failsafe |
+
+A **gamepad** is used automatically when connected: left stick
+yaw/throttle, right stick roll/pitch, `A` arm, `B` mode, `Y` failsafe
+action (axis/button numbers are at the top of `rendering/window.py`).
+
+**Flight modes**
+
+- `POS` (position hold): sticks command velocity; centred = hover in place. Easiest.
+- `ALT` (altitude hold, default): sticks command tilt; throttle centred = hold altitude.
+- `ANGLE`: sticks command tilt; throttle is raw collective thrust (hover ≈ 41%).
+- `ACRO`: sticks command rotation rates; nothing self-levels.
+
+**Failsafe** (what the drone does when the uplink is jammed):
+
+1. No valid frame for 0.1 s → `RX LOSS`: keep flying on the last sticks.
+2. After 0.3 s → sticks centred, the aircraft self-levels (ACRO becomes ANGLE).
+3. After 1.0 s → the selected action: `RTH` (climb to 15 m, fly home,
+   land, disarm), `HOLD` (hover in place), `LAND` (descend 1 m/s, disarm)
+   or `DROP` (cut motors).
+
+Stages 1–2 recover as soon as frames arrive again. Stage 3 hands control
+back only after the link has been good for 0.5 s **and** the pilot moves
+a stick, so drifting out of a jammer's range does not drop a hands-off
+pilot back into manual mid-air. The position estimate is perfect (an
+ideal GNSS); GNSS jamming is not modelled yet.
+
+**Camera and simulation** (never first-person — always an external observer):
 
 | Key          | Action |
 |--------------|--------|
 | Arrow keys   | FREE mode: move the camera. FOLLOW mode: orbit / zoom |
 | Mouse        | Rotate view (orbit in FOLLOW, look around in FREE) |
-| `V`          | Toggle between FOLLOW (chases the UAV, GTA-style) and FREE (spectator, fully free) |
-| `BACKSPACE`  | Reset UAV + randomly reposition all jammers |
+| `V`          | Toggle between FOLLOW (chases the UAV) and FREE (spectator) |
+| `F`          | Toggle chaotic DSSS anti-jamming (N=8) on/off |
+| `H`          | Toggle the uplink interference map painted on the ground |
 | `P`          | Pause / unpause (camera keeps working while paused) |
-| `D`          | Toggle chaotic DSSS anti-jamming (N=8) on/off |
-| `K`          | Save screenshot to `assets/images/` |
+| `BACKSPACE`  | Reset UAV + randomly reposition all jammers |
+| `F12`        | Save screenshot to `assets/images/` |
 | `ESC`        | Quit |
 
 When pressing `V` the camera doesn't "jump": it keeps the current viewpoint
@@ -117,40 +163,72 @@ and only changes how it's controlled from there onward.
 
 ## HUD
 
-Everything the HUD shows comes from the signal the UAV periodically
-transmits (or from the channels' own statistics), never from reading the UAV
-directly — the `HUD` only talks to the `UAVOperator`.
+Flight data comes only from the telemetry the UAV transmits, never from
+reading the UAV directly — when the downlink is jammed the numbers turn
+grey and freeze (`TLM LOST`), just like a real ground station.
 
-- **Battery** (`BAT`, %) — drains faster the more total thrust the motors use.
-- **Altitude** (`ALT`, meters).
-- **Health** (`HP`, %) — decreases on hard landings (vertical impact
-  velocity > 3 m/s). At 0% the UAV is dead: motors stop, no commands are
-  processed, physics still applies (gravity). Damage also reduces effective
-  max thrust linearly down to 50% at 0 HP.
-- **Drone attitude** (`ROL`/`PIT`/`YAW`, degrees) — roll, pitch, yaw.
-- **Horizontal position** (`POSX`/`POSY`, meters).
-- **Mass** (`MASS`, kg) — total mass = body + 4 motors, treated as a single
-  point mass for physics (each motor's separate inertia is not modeled).
-- **Command log** — last 10 commands received by the UAV, shown below the
-  telemetry readout. Valid commands appear in green, corrupted ones in red.
-- **Minimap** (bottom-right) — top-down view (200×200 world-units) with the
-  UAV icon at centre (coloured motor circles + X rotated by yaw) and jammer
-  positions with their effect-range circles, clipped to the minimap border.
-- **Bandwidth** — two oscilloscope-style panels: `TX` (uplink:
-  Operator → UAV, commands) and `RX` (downlink: UAV → Operator, telemetry).
-  Each panel shows a **single channel** (no multi-channel): bandwidth in
-  bytes/sec and, drawn as a real NRZ square wave, the actual signal the
-  `CommGatewayOutput` encoded and transmitted bit by bit — not a decorative
-  animation, these are the real bits of each message.
-- **Noise timeline** — real-time graph of uplink (TX) and downlink (RX) noise
-  voltage below the signal panels, updated every frame.
-- **DSSS correlation meter** — when anti-jamming is active (`D` key), a
-  horizontal bar shows per-burst correlation quality (green = good, red =
-  jammed) for both links, with a `DSSS:N` label above the minimap.
-- Per-motor throttle bars at the bottom, as before.
+- **Flight data** — `BAT`, `ALT`, `VZ` (climb rate), `SPD` (ground speed),
+  `HP`, `POSX`/`POSY`, `ROL`/`PIT`/`YAW`.
+- **Transmitter state** — `MODE`, `ARM` switch, `FS` (failsafe action),
+  radio backend, `PAD` when a gamepad is in use.
+- **Link quality** — `LQ UP` is the % of RC frames the UAV actually
+  received over the last second (it measures it and reports it in
+  telemetry); `LQ DN` is the % of telemetry packets the ground station
+  received. Green ≥ 80, amber ≥ 40, red below.
+- **Stick monitor** — `TX` shows the sticks the pilot is sending, `RX`
+  the sticks the UAV is actually applying. They diverge during a failsafe.
+- **Banner** — `DISARMED`, `RX LOSS`, `FAILSAFE RTH/HOLD/LAND/DROP`,
+  `TLM LOST`, `TX OFF`.
+- **Motor bars** — the four motor commands from the flight controller.
+- **Minimap** — top-down view around the UAV: interference map, jammers
+  (coloured by type), ground station (triangle) and home point (square).
+  In the 3D view the home point is a cyan `H` and a dashed drop line marks
+  the UAV's position over the ground.
+- **TX / RX scopes, DSSS correlation meter** — the real bits and waveform
+  of each burst, and DSSS correlation quality when anti-jamming is on (`F`).
+- **SINR timeline** (simulation instrument, not part of the OSD) — uplink
+  and downlink SINR in dB over time, with the 7 dB "link dead" line.
 
-All HUD text (letters, numbers, `%`, `:`, etc.) is drawn with a TrueType
-texture atlas (`rendering/ttf_font.py`) via a 7-segment TTF font.
+## Jammers and the radio environment
+
+The pilot's **ground station** (tripod near the take-off point) holds the
+RC transmitter and the telemetry receiver. Every frame the simulator
+computes a link budget for each direction (`uavsim/world/rf.py`):
+
+    received power  = Tx power + antenna gains - path loss(distance, heights)
+    SINR            = received power - (noise floor + Σ jammer power at the receiver)
+
+- **Uplink** (control) is received by the UAV; **downlink** (telemetry) by
+  the ground station. A jammer near the drone kills control while the
+  ground station still hears telemetry, and a jammer near the pilot does
+  the opposite.
+- **Distance matters on both sides**: what counts is the jammer's distance
+  to the receiver *relative* to the wanted transmitter's. The further you
+  fly from the ground station, the larger every jammer's zone becomes.
+- **Height matters**: path loss uses a log-distance model whose exponent
+  goes from ~2 (line of sight, an antenna above ~30 m) to ~2.9 (both near
+  the ground). Climbing usually improves the link — which is why RTH
+  climbing first helps.
+- **Jammer powers add up** (in mW), they don't just take the maximum.
+
+Defaults: 2.44 GHz, 500 mW ground station, 100 mW telemetry radio,
+-108 dBm noise floor, jammers between 4 and 25 mW. With the calibrated
+link model, RC frames get through ~90% of the time at 11 dB SINR and
+~10% at 7 dB.
+
+**Jammer types** (colour of the antenna light; it is lit while transmitting):
+
+| Type | Colour | Behaviour | Effect on the failsafe |
+|---|---|---|---|
+| BARRAGE | red | always on | sustained loss → RTH/HOLD/LAND/DROP |
+| PULSED | magenta | on 30% of every 0.25 s | LQ drops to ~70%, bursts (75 ms) shorter than the 100 ms RX-loss timeout |
+| SWEPT | orange | crosses our channel for 72 ms every 0.6 s | small LQ dips, never a failsafe on its own |
+
+**Interference map** (`H`): the ground and minimap are painted with the
+uplink SINR a UAV would get at its *current altitude* if every jammer were
+on (worst case): transparent above 14 dB, yellow → orange → red down to
+7 dB and below. The line from the ground station to the UAV uses the same
+colours and turns dashed when the control link is dead.
 
 ## Communication: Real GNU Radio, not an in-memory queue
 
@@ -176,73 +254,66 @@ send(bytes) -> [preamble + access code + payload + CRC32 + tail padding]
 
 Real consequences, not cosmetic:
 
-- **Packets can be lost or corrupted**: with low noise (default
-  `noise_voltage=0.05`) almost everything arrives intact, but it's a real
-  radio, not a guarantee. If the access code doesn't sync or CRC32 fails,
+- **Packets can be lost or corrupted**: the channel's `noise_voltage` is
+  set every frame from the link budget (`noise = 10^(-SINR/20)` on a
+  unit-power signal). With a clean sky almost everything arrives intact,
+  but it's a real radio, not a guarantee. If the access code doesn't sync or CRC32 fails,
   the packet is dropped — corrupted data is never delivered to the app
   (`UAV`/`Operator` silently ignore corrupt packets, they don't crash).
 - **Delivery is asynchronous with real jitter**: each burst (encode +
   modulate + pass through the channel + demodulate) costs ~10ms of real CPU
-  time, so it runs in a background thread per channel, never blocking the
-  main loop. That's why the `UAVOperator` doesn't send one command per frame:
-  it retransmits each (motor, direction) combination at a max of 20 Hz
-  (`COMMAND_SEND_INTERVAL`), just like a real RC transmitter, well below the
-  measured ~100 bursts/sec per thread ceiling.
-- **Throttle no longer depends on `dt`**: since commands arrive async and
-  with jitter (not a perfect once-per-frame tick as before), each `Motor`
-  now bumps up/down by a fixed step (`throttle_step_up`/`throttle_step_down`)
-  per received command, rather than a rate multiplied by `dt`.
-- **A bit of aerodynamic drag appears** (`RigidBody.linear_drag_coefficient`
-  / `angular_drag_coefficient`): with perfectly synchronous delivery all 4
-  motors always rose at exactly the same rate and there was never any yaw
-  from asymmetry. With a real radio, jitter between motors is real (one may
-  arrive a few ms before another), and without any drag that accumulated
-  into unbounded spin. Drag is passive physics (it resists existing
-  velocity/spin, never pushes toward a target attitude) — it's not
-  auto-stabilization or a flight controller.
+  time, so it runs in a background process per channel, never blocking the
+  main loop. RC frames (11 bytes) go out at 50 Hz and telemetry (174 bytes)
+  at 10 Hz, below the measured ~100 bursts/sec per worker ceiling.
+- **Longer packets die first**: at the same noise level the 174-byte
+  telemetry packet is far more likely to fail its CRC than the 11-byte RC
+  frame, so inside a jammer you often keep some control but lose the
+  telemetry (`LQ UP` stays up while `LQ DN` drops).
 
 ## Architecture
 
 ```
 uavsim/
+├── control/
+│   ├── rc.py              RCPacket: 11-byte absolute-stick frame, FlightMode, FailsafeAction
+│   ├── pid.py             PID (vector, integrator clamp, derivative on measurement)
+│   ├── flight_controller.py  Cascaded position/velocity/attitude/rate loops + mixer
+│   └── failsafe.py        LinkMonitor (LQ) + staged failsafe (HOLD/LAND/RTH/DROP)
 ├── comms/
-│   ├── command.py         Command + CommandOpcode: 1-byte protocol
-│   ├── telemetry.py       TelemetryPacket: binary struct (battery + mass + health + command log)
-│   ├── gnuradio_link.py   GnuRadioChannel: real radio link (GMSK +
-│   │                      noisy channel + demod + CRC), with its own
-│   │                      background thread
+│   ├── telemetry.py       TelemetryPacket: state + applied sticks + uplink LQ + failsafe
+│   ├── gnuradio_link.py   GnuRadioChannel: real GMSK + noisy channel + demod + CRC,
+│   │                      in its own subprocess
+│   ├── loopback_link.py   LoopbackChannel: same interface, statistical numpy model
+│   ├── link_stats.py      TX/RX history + bandwidth shared by both backends
 │   ├── comm_chaos_adapter.py DSSSChaotic + Lorenz-based spread/despread
-│   └── gateway.py          CommGatewayInput/Output: wrap a
-│                            GnuRadioChannel: Output sees TX traffic
-│                            (transmitted), Input sees RX traffic (actually
-│                            received, with losses already applied)
+│   └── gateway.py         CommGatewayInput/Output wrappers around a channel
 ├── physics/
-│   ├── motor.py           Motor: throttle -> thrust + reaction torque
-│   │                      (fixed step per command, no longer per-dt)
-│   ├── battery.py         Battery: drains based on motor usage
-│   └── rigid_body.py      RigidBody: generic 6DOF (numpy + scipy Rotation)
-│                           + linear/angular aerodynamic drag
+│   ├── motor.py           Motor: command -> spin-up lag -> thrust ∝ speed² + yaw torque
+│   ├── battery.py         Battery: drains based on motor load
+│   └── rigid_body.py      RigidBody: 6DOF (numpy + scipy Rotation) + linear/quadratic drag
 ├── world/
-│   └── environment.py     World / FlatGroundPlane + apply_ground_contact()
-│                          (UAV doesn't clip through the floor; takes off
-│                          only when thrust is sufficient)
+│   ├── environment.py     Flat ground, ground station position, ground contact, world bounds
+│   └── rf.py              Link budgets: path loss, jammer interference, SINR per link,
+│                          SINR -> channel noise, SINR grid for the interference map
 ├── entities/
-│   ├── uav.py             UAV: 4 motors in X config, total mass, battery,
-│   │                      applies commands, runs physics + ground contact +
-│   │                      crash detection + health/damage, emits periodic
-│   │                      telemetry
-│   └── operator.py        UAVOperator: keys -> Command, rate-limited to
-│                          20 Hz per (motor, direction) to CommGatewayOutput
+│   ├── uav.py             UAV: frames in -> arming -> failsafe -> flight controller
+│   │                      -> motors -> physics -> telemetry, at a fixed 250 Hz tick
+│   ├── operator.py        UAVOperator: keyboard/gamepad -> sticks -> RC frames at 50 Hz;
+│   │                      ground-station telemetry + downlink LQ
+│   └── jammer.py          Jammer: power, antenna, type (BARRAGE / PULSED / SWEPT) and timing
 ├── hud/
-│   └── hud.py             HUD: telemetry + bandwidth + raw signal + command
-│                          log, all read from the Operator
+│   └── hud.py             HUDSnapshot from telemetry + transmitter state + link stats
 └── rendering/
-    ├── window.py           Window + unified input (motors, arrows,
-    │                       mouse, camera toggle, reset) via pygame
-    ├── camera.py           Camera: FOLLOW (orbit) and FREE (spectator) modes
-    ├── ttf_font.py          TrueType texture atlas font renderer
-    └── renderer.py         Draws terrain + UAV + full HUD
+    ├── window.py          Window + keyboard/gamepad/mouse input via pygame
+    ├── camera.py          Camera: FOLLOW (orbit) and FREE (spectator) modes
+    ├── ttf_font.py        TrueType texture atlas font renderer
+    └── renderer.py        Terrain, interference map, UAV, jammers, ground station, HUD
+tests/                     pytest: protocol, flight modes, failsafe, link model, RF model
 ```
+
+Physics and control run at a **fixed 250 Hz in simulation time**
+(`PHYSICS_HZ` in `main.py`), decoupled from the render frame rate; pausing
+stops simulation time, so it never triggers a failsafe.
 
 ### Why the camera bug happened (historical)
 
@@ -260,8 +331,9 @@ doesn't "go crazy" with it.
 
 ### Design decisions
 
-- **Real bit-level protocol**: `Command.encode()`/`decode()` pack each order
-  into a real 1-byte packet, and the UAV decodes it via `CommGatewayInput`.
+- **Real bit-level protocol**: `RCPacket.encode()`/`decode()` pack the
+  sticks and switches into a real 11-byte frame, and the UAV decodes it
+  via `CommGatewayInput`.
 - **Telemetry with `struct`**: binary pack/unpack using the standard library.
 - **Physics with `numpy` + `scipy.spatial.transform.Rotation`**: scipy
   quaternions instead of hand-rolled rotation matrices.
@@ -289,8 +361,12 @@ following papers (PDFs available in `docs/`):
 
 ## Next steps (not yet implemented)
 
-- ~~Jammers~~ ✅ done — orange-red cylinders with dotted range circles that
-  raise the noise floor on both radio links. Randomly placed at startup,
-  repositioned on reset. The minimap shows their positions and range.
+- Narrowband (tone) and reactive jammers — they need the radio channel
+  itself to change, not just its noise level — and GNSS jamming/spoofing.
+- Fading / shadowing, and terrain that blocks line of sight.
+- Better mitigation: spread the sync word, soft-decision despreading,
+  per-packet keyed sequences, FEC + interleaving, compact telemetry,
+  adaptive spreading, frequency hopping.
+- Headless batch runs that output link-quality curves vs J/S.
 - Non-flat terrain.
 - More realistic ground contact (real normal force instead of clamping).
